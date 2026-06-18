@@ -1,0 +1,17 @@
+__pycache__/
+.pycache_tmp/
+*.py[cod]
+.DS_Store
+
+# Local / licensed source exports
+ma_export_*.csv
+
+# Large downloaded SEC artifacts and cache
+*/documents/
+*/_cache/
+*/claude_upload_packages/*/selected_docs/
+
+# API outputs can contain full request/response payloads; keep committed examples
+# intentional and small.
+llm_field_results*.jsonl
+llm_field_extractions*.csv

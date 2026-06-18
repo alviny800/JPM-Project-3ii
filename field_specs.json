@@ -1,0 +1,159 @@
+{
+  "version": "2026-06-17",
+  "scope": "SEC EDGAR field locator for corporate-action election/proration merger events. External market, ownership, and borrow data are documented separately and are not fetched by this SEC script.",
+  "fields": {
+    "consideration_menu": {
+      "required": true,
+      "description": "Full menu of merger consideration choices available to target holders, such as cash election, stock election, mixed election, or default/non-election path.",
+      "timing_bucket": "pre_election_trade_entry",
+      "release_timing": "T1 registration/proxy stage or T2 election materials, before the election deadline.",
+      "document_keys": ["S-4/F-4 registration statement", "424B final prospectus", "DEFM14A definitive proxy", "election form/letter of transmittal"],
+      "preferred_forms": ["424B3", "424B5", "S-4", "S-4/A", "F-4", "F-4/A", "DEFM14A", "PREM14A", "EX-99"],
+      "keywords": ["merger consideration", "cash election", "stock election", "mixed election", "consideration election", "election form", "form of election", "non-election", "non-electing"]
+    },
+    "cash_consideration_per_share": {
+      "required": true,
+      "description": "Cash amount payable per target share under the cash election or cash component of the merger consideration.",
+      "timing_bucket": "pre_election_trade_entry",
+      "release_timing": "T0 announcement/merger agreement may state headline amount; final source is T1 S-4/424B/DEFM14A or T2 election materials.",
+      "document_keys": ["merger agreement exhibit", "S-4/F-4 registration statement", "424B final prospectus", "DEFM14A definitive proxy"],
+      "preferred_forms": ["424B3", "424B5", "S-4", "S-4/A", "F-4", "F-4/A", "DEFM14A", "PREM14A", "8-K", "EX-2", "EX-99"],
+      "keywords": ["cash consideration", "cash election", "per share in cash", "cash amount", "cash component", "aggregate cash consideration", "cash merger consideration"]
+    },
+    "stock_consideration_per_share": {
+      "required": true,
+      "description": "Stock consideration payable per target share under the stock election or stock component of the merger consideration.",
+      "timing_bucket": "pre_election_trade_entry",
+      "release_timing": "T0 announcement/merger agreement may state headline amount; final source is T1 S-4/424B/DEFM14A or T2 election materials.",
+      "document_keys": ["merger agreement exhibit", "S-4/F-4 registration statement", "424B final prospectus", "DEFM14A definitive proxy"],
+      "preferred_forms": ["424B3", "424B5", "S-4", "S-4/A", "F-4", "F-4/A", "DEFM14A", "PREM14A", "8-K", "EX-2", "EX-99"],
+      "keywords": ["stock consideration", "stock election", "share consideration", "stock component", "aggregate stock consideration", "stock merger consideration", "common stock", "shares of common stock"]
+    },
+    "exchange_ratio": {
+      "required": true,
+      "description": "Exchange ratio used to convert each target share into acquirer shares, including fixed/floating collar mechanics if applicable.",
+      "timing_bucket": "pre_election_trade_entry",
+      "release_timing": "T0 announcement/merger agreement may state it; final pre-election source is T1 S-4/424B/DEFM14A.",
+      "document_keys": ["merger agreement exhibit", "S-4/F-4 registration statement", "424B final prospectus", "DEFM14A definitive proxy"],
+      "preferred_forms": ["424B3", "424B5", "S-4", "S-4/A", "F-4", "F-4/A", "DEFM14A", "PREM14A", "8-K", "EX-2"],
+      "keywords": ["exchange ratio", "exchange rate", "fixed exchange ratio", "floating exchange ratio", "shares of common stock for each share", "shares for each share", "for each share of"]
+    },
+    "cash_cap": {
+      "required": true,
+      "description": "Maximum aggregate cash amount, cash election number, or cash allocation cap used in proration.",
+      "timing_bucket": "pre_election_trade_entry",
+      "release_timing": "T1 registration/proxy stage, before election deadline; sometimes repeated in T2 election documents.",
+      "document_keys": ["DEFM14A definitive proxy", "424B final prospectus", "S-4/F-4 registration statement", "election form/letter of transmittal"],
+      "preferred_forms": ["DEFM14A", "424B3", "424B5", "S-4", "S-4/A", "F-4", "F-4/A", "PREM14A", "EX-99"],
+      "keywords": ["cash cap", "aggregate cash consideration", "maximum cash", "maximum cash amount", "cash election number", "cash fraction", "cash election consideration", "cash elections are oversubscribed"]
+    },
+    "stock_cap": {
+      "required": true,
+      "description": "Maximum aggregate stock amount, stock election number, or stock allocation cap used in proration.",
+      "timing_bucket": "pre_election_trade_entry",
+      "release_timing": "T1 registration/proxy stage, before election deadline; sometimes repeated in T2 election documents.",
+      "document_keys": ["DEFM14A definitive proxy", "424B final prospectus", "S-4/F-4 registration statement", "election form/letter of transmittal"],
+      "preferred_forms": ["DEFM14A", "424B3", "424B5", "S-4", "S-4/A", "F-4", "F-4/A", "PREM14A", "EX-99"],
+      "keywords": ["stock cap", "aggregate stock consideration", "maximum stock", "maximum stock amount", "stock election number", "stock fraction", "stock election consideration", "stock elections are oversubscribed"]
+    },
+    "proration_formula": {
+      "required": true,
+      "description": "Formula/mechanics governing allocation when cash or stock elections exceed the cap, including oversubscription/undersubscription rules.",
+      "timing_bucket": "pre_election_trade_entry",
+      "release_timing": "T1 registration/proxy stage, before election deadline; operational version may be in T2 election materials.",
+      "document_keys": ["DEFM14A definitive proxy", "424B final prospectus", "S-4/F-4 registration statement", "election form/letter of transmittal", "Schedule TO-T/offer to purchase for tender deals"],
+      "preferred_forms": ["DEFM14A", "424B3", "424B5", "S-4", "S-4/A", "F-4", "F-4/A", "PREM14A", "SC TO-T", "SC TO-T/A", "SC 14D9", "SC 14D9/A", "EX-99"],
+      "keywords": ["proration", "proration procedures", "proration factor", "prorated", "pro rata", "oversubscribed", "oversubscription", "undersubscribed", "allocation procedures", "election procedures", "cash elections are oversubscribed", "stock elections are oversubscribed"]
+    },
+    "non_election_default_rule": {
+      "required": true,
+      "description": "Default treatment for shares whose holders do not make a valid election, including whether they are deemed cash, stock, mixed, or non-election shares subject to allocation.",
+      "timing_bucket": "pre_election_trade_entry",
+      "release_timing": "T1 proxy/prospectus stage or T2 election form/letter of transmittal, before election deadline.",
+      "document_keys": ["DEFM14A definitive proxy", "424B final prospectus", "S-4/F-4 registration statement", "election form/letter of transmittal"],
+      "preferred_forms": ["DEFM14A", "424B3", "424B5", "S-4", "S-4/A", "F-4", "F-4/A", "PREM14A", "EX-99"],
+      "keywords": ["non-election", "non-electing", "non electing", "non-election shares", "non-electing shares", "deemed to have elected", "no election", "fail to make an election", "failed to make an election", "valid election", "election form"]
+    },
+    "election_deadline": {
+      "required": true,
+      "description": "Deadline or expiration time for submitting a valid cash, stock, mixed, or tender/election instruction.",
+      "timing_bucket": "pre_election_trade_entry",
+      "release_timing": "T2 election/tender materials, before the deadline; sometimes initially estimated in T1 proxy/prospectus.",
+      "document_keys": ["election form/letter of transmittal", "Schedule TO-T/offer to purchase", "DEFM14A definitive proxy", "424B final prospectus"],
+      "preferred_forms": ["DEFM14A", "424B3", "424B5", "S-4", "S-4/A", "F-4", "F-4/A", "PREM14A", "SC TO-T", "SC TO-T/A", "SC 14D9", "SC 14D9/A", "EX-99"],
+      "keywords": ["election deadline", "deadline for making", "deadline for submitting", "election form", "election procedures", "expiration date", "expiration time", "properly completed", "letter of transmittal", "form of election", "valid election"]
+    },
+    "record_date": {
+      "required": true,
+      "description": "Record date for stockholder voting and/or election eligibility, if specified.",
+      "timing_bucket": "pre_election_trade_entry",
+      "release_timing": "T1 proxy/prospectus stage, before shareholder meeting/election deadline.",
+      "document_keys": ["DEFM14A definitive proxy", "S-4/F-4 registration statement", "424B final prospectus"],
+      "preferred_forms": ["DEFM14A", "PREM14A", "424B3", "424B5", "S-4", "S-4/A", "F-4", "F-4/A"],
+      "keywords": ["record date", "close of business on", "holders of record", "stockholders of record", "shareholders of record"]
+    },
+    "odd_lot_priority": {
+      "required": false,
+      "description": "Odd-lot or small-holder priority treatment, if the election/tender mechanics include it.",
+      "timing_bucket": "pre_election_trade_entry",
+      "release_timing": "Usually T2 tender/election materials; not present in all mergers.",
+      "document_keys": ["letter of transmittal", "offer to purchase", "Schedule TO-T", "election form"],
+      "preferred_forms": ["SC TO-T", "SC TO-T/A", "SC 14D9", "SC 14D9/A", "424B3", "S-4", "S-4/A", "DEFM14A", "EX-99"],
+      "keywords": ["odd lot", "odd-lot", "less than 100 shares", "priority", "small holder", "odd lot shares"]
+    },
+    "guaranteed_delivery_window": {
+      "required": false,
+      "description": "Guaranteed-delivery mechanics and time window for tender/election documents, if available.",
+      "timing_bucket": "pre_election_trade_entry",
+      "release_timing": "T2 tender/election materials, before expiration/election deadline.",
+      "document_keys": ["notice of guaranteed delivery", "letter of transmittal", "offer to purchase", "Schedule TO-T"],
+      "preferred_forms": ["SC TO-T", "SC TO-T/A", "SC 14D9", "SC 14D9/A", "424B3", "S-4", "EX-99"],
+      "keywords": ["guaranteed delivery", "notice of guaranteed delivery", "letter of transmittal", "election form", "properly completed"]
+    },
+    "preliminary_proration_results": {
+      "required": true,
+      "description": "Preliminary election results or preliminary proration factor after the election deadline, used as a post-election label only.",
+      "timing_bucket": "post_election_label",
+      "release_timing": "T4 after election deadline and near/after closing; never a trade-entry feature.",
+      "document_keys": ["post-deadline 8-K", "EX-99.1 press release", "Form 425 communication"],
+      "preferred_forms": ["8-K", "8-K/A", "425", "EX-99"],
+      "keywords": ["preliminary proration", "preliminary election results", "preliminary results", "preliminary proration factor", "election results", "proration factor"]
+    },
+    "final_proration_results": {
+      "required": true,
+      "description": "Final election results, realized proration factor, and realized fill-rate label after the deadline.",
+      "timing_bucket": "post_election_label",
+      "release_timing": "T4 after election deadline and near/after closing; never a trade-entry feature.",
+      "document_keys": ["post-deadline 8-K", "EX-99.1 press release", "final proration announcement", "Form 425 communication"],
+      "preferred_forms": ["8-K", "8-K/A", "425", "EX-99"],
+      "keywords": ["final proration", "final election results", "final results", "final proration factor", "election results", "proration factor", "proration rate"]
+    },
+    "realized_cash_election_demand": {
+      "required": false,
+      "description": "Actual number or percentage of shares electing cash, if disclosed in final/proration result filings.",
+      "timing_bucket": "post_election_label",
+      "release_timing": "T4 after election deadline and near/after closing.",
+      "document_keys": ["post-deadline 8-K", "EX-99.1 press release", "final proration announcement"],
+      "preferred_forms": ["8-K", "8-K/A", "425", "EX-99"],
+      "keywords": ["cash election results", "cash elections", "elected to receive cash", "cash election shares", "cash election demand", "final election results"]
+    },
+    "realized_stock_election_demand": {
+      "required": false,
+      "description": "Actual number or percentage of shares electing stock, if disclosed in final/proration result filings.",
+      "timing_bucket": "post_election_label",
+      "release_timing": "T4 after election deadline and near/after closing.",
+      "document_keys": ["post-deadline 8-K", "EX-99.1 press release", "final proration announcement"],
+      "preferred_forms": ["8-K", "8-K/A", "425", "EX-99"],
+      "keywords": ["stock election results", "stock elections", "elected to receive stock", "stock election shares", "stock election demand", "final election results"]
+    },
+    "deal_completion_or_break": {
+      "required": true,
+      "description": "Whether and when the transaction completed, became effective, or was terminated/broken.",
+      "timing_bucket": "post_election_label",
+      "release_timing": "T4 closing or termination stage; used for backtest settlement/tail-risk labels, not trade-entry features.",
+      "document_keys": ["closing 8-K", "termination 8-K", "EX-99.1 press release"],
+      "preferred_forms": ["8-K", "8-K/A", "425", "DEFA14A", "EX-99"],
+      "keywords": ["completed the merger", "completion of the merger", "effective time", "closed the transaction", "closing of the merger", "terminated the merger agreement", "termination of the merger agreement", "will not proceed"]
+    }
+  }
+}

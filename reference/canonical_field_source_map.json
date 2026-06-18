@@ -1,0 +1,242 @@
+[
+  {
+    "field": "consideration_menu",
+    "selected_source": "Earliest true source: Announcement Form 8-K Exhibit 2.1 Merger Agreement or Exhibit 99.1 press release if the full cash/stock election menu is stated. If not complete there, use the first S-4/S-4A/424B3/DEFM14A that states the final election menu.",
+    "backup_sources": "S-4/S-4A, 424B3/final prospectus, DEFM14A/proxy, election form/letter of transmittal",
+    "phase": "Announcement package if present there; otherwise election-making/proxy-registration process",
+    "selection_rule": "If all sources agree, pick the earliest filed document. If announcement materials are incomplete or later amended, pick the earliest document whose menu matches the final operative terms.",
+    "source_type": "SEC transaction filing"
+  },
+  {
+    "field": "cash_consideration_per_share",
+    "selected_source": "Earliest true source: Announcement Form 8-K Exhibit 2.1 Merger Agreement or Exhibit 99.1 press release. If the cash amount is only finalized later, use the earliest S-4/S-4A/424B3/DEFM14A with final value.",
+    "backup_sources": "S-4/S-4A, 424B3, DEFM14A, offer to purchase/Schedule TO-T for tender offers",
+    "phase": "Announcement package; later corrected/finalized during election-making if amended",
+    "selection_rule": "Use announcement value only if it is identical to final operative documents. If changed, earlier stale value is retained as conflict evidence but not selected.",
+    "source_type": "SEC transaction filing"
+  },
+  {
+    "field": "stock_consideration_per_share",
+    "selected_source": "Earliest true source: Announcement Form 8-K Exhibit 2.1 Merger Agreement or Exhibit 99.1 press release if it states shares/value offered. If formulaic, use the earliest document stating the final stock consideration mechanics.",
+    "backup_sources": "S-4/S-4A, 424B3, DEFM14A, merger proxy/prospectus",
+    "phase": "Announcement package; otherwise election-making/proxy-registration process",
+    "selection_rule": "Pick the earliest document that states the final stock consideration. For floating value/collar deals, retain the formula and pricing period instead of forcing a fixed per-share number.",
+    "source_type": "SEC transaction filing"
+  },
+  {
+    "field": "exchange_ratio",
+    "selected_source": "Earliest true source: Announcement Form 8-K Exhibit 2.1 Merger Agreement or Exhibit 99.1 press release. For amended/collar/floating structures, use the earliest filing that states the final ratio or final ratio formula.",
+    "backup_sources": "S-4/S-4A, 424B3, DEFM14A, merger agreement amendments",
+    "phase": "Announcement package; or election-making if ratio is finalized/amended later",
+    "selection_rule": "If fixed ratio appears consistently, select earliest. If ratio changes, select earliest document with the final operative ratio/formula.",
+    "source_type": "SEC transaction filing"
+  },
+  {
+    "field": "cash_cap",
+    "selected_source": "Earliest true source: Announcement Form 8-K Exhibit 2.1 Merger Agreement if it states aggregate cash cap or maximum cash election amount. If not explicit/clean, use earliest S-4/S-4A/424B3/DEFM14A with final cap.",
+    "backup_sources": "S-4/S-4A, 424B3, DEFM14A, election form, letter of transmittal",
+    "phase": "Announcement package if in merger agreement; otherwise election-making/proxy-registration process",
+    "selection_rule": "DEFM14A/424B3 often provides the cleanest summary, but selected_source should still be the earliest document containing the final cap value.",
+    "source_type": "SEC transaction filing"
+  },
+  {
+    "field": "stock_cap",
+    "selected_source": "Earliest true source: Announcement Form 8-K Exhibit 2.1 Merger Agreement if it states aggregate stock cap or maximum stock election amount. If not explicit/clean, use earliest S-4/S-4A/424B3/DEFM14A with final cap.",
+    "backup_sources": "S-4/S-4A, 424B3, DEFM14A, election form, letter of transmittal",
+    "phase": "Announcement package if in merger agreement; otherwise election-making/proxy-registration process",
+    "selection_rule": "Use earliest final value; flag differences between agreement, prospectus, and final election form.",
+    "source_type": "SEC transaction filing"
+  },
+  {
+    "field": "proration_formula",
+    "selected_source": "Earliest true source: Announcement Form 8-K Exhibit 2.1 Merger Agreement if the actual formula is stated. Otherwise use earliest S-4/S-4A/424B3/DEFM14A or letter of transmittal/election form with final proration mechanics.",
+    "backup_sources": "DEFM14A, 424B3, S-4/S-4A, letter of transmittal, election form, Schedule TO-T/offer to purchase",
+    "phase": "Announcement package if formula is in the merger agreement; otherwise election-making process",
+    "selection_rule": "Do not select vague announcement language. Select the earliest filing with an actual computable formula and final cap definitions.",
+    "source_type": "SEC transaction filing"
+  },
+  {
+    "field": "non_election_default_rule",
+    "selected_source": "Earliest true source: first S-4/S-4A/424B3/DEFM14A/election form/letter of transmittal that states how non-electing shares are treated. Merger agreement may be selected only if it clearly states the rule.",
+    "backup_sources": "DEFM14A, 424B3, S-4/S-4A, election form, letter of transmittal, Schedule TO-T/offer to purchase",
+    "phase": "Usually election-making/proxy-registration process; rarely announcement package",
+    "selection_rule": "This field can flip the trade sign. Prefer the earliest explicit and operational rule, not a vague summary.",
+    "source_type": "SEC transaction filing"
+  },
+  {
+    "field": "election_deadline",
+    "selected_source": "Earliest true source: election form, letter of transmittal, offer to purchase, or Schedule TO-T that states the final election/expiration deadline. If deadline is extended, use the earliest extension 8-K/press release that states the new final deadline.",
+    "backup_sources": "DEFM14A, 424B3, S-4/S-4A, Form 425 communications, 8-K/EX-99.1 extension notices",
+    "phase": "Election-making process; extension notices may appear during election-making or immediately before completion",
+    "selection_rule": "If the deadline changes, the original deadline is stale. Selected value should be the earliest filing containing the final operative deadline.",
+    "source_type": "SEC transaction filing / offer material"
+  },
+  {
+    "field": "record_date",
+    "selected_source": "Earliest true source: DEFM14A/proxy notice or S-4/proxy-prospectus that states shareholder record date. For tender offers, may be N/A unless a vote/record holder concept applies.",
+    "backup_sources": "S-4/S-4A, 424B3, PREM14A, Form 425 proxy communications",
+    "phase": "Election-making/proxy-registration process",
+    "selection_rule": "Select earliest document with the final record date used for voting/election eligibility. Flag preliminary proxy dates if final proxy changes them.",
+    "source_type": "SEC transaction filing"
+  },
+  {
+    "field": "odd_lot_priority",
+    "selected_source": "Earliest true source: letter of transmittal, offer to purchase, or Schedule TO-T/TO-T-A exhibit that states odd-lot priority. Often N/A for standard merger elections.",
+    "backup_sources": "Election form, notice of guaranteed delivery, SC 14D-9, 424B3/DEFM14A if summarized",
+    "phase": "Election-making process",
+    "selection_rule": "Do not infer. Return N/A unless the offer/election material explicitly grants odd-lot priority.",
+    "source_type": "SEC offer/election material"
+  },
+  {
+    "field": "guaranteed_delivery_window",
+    "selected_source": "Earliest true source: notice of guaranteed delivery, letter of transmittal, offer to purchase, or Schedule TO-T exhibit that states guaranteed delivery rules/window. Often N/A in non-tender merger elections.",
+    "backup_sources": "Election form, Schedule TO-T/TO-T-A, SC 14D-9, 424B3/DEFM14A if summarized",
+    "phase": "Election-making process",
+    "selection_rule": "Select explicit window/rule only. If no guaranteed-delivery mechanism exists, return N/A with evidence.",
+    "source_type": "SEC offer/election material"
+  },
+  {
+    "field": "preliminary_proration_results",
+    "selected_source": "Earliest true source: post-deadline Form 8-K Exhibit 99.1 press release or standalone press release announcing preliminary election/proration results.",
+    "backup_sources": "8-K, 8-K/A, issuer/acquirer press release, Form 425 if filed as communication",
+    "phase": "Completion/post-election statement stage",
+    "selection_rule": "This is a post-election label, not a pre-trade feature. Select earliest preliminary result; later final result is separate.",
+    "source_type": "SEC post-deadline filing / press release"
+  },
+  {
+    "field": "final_proration_results",
+    "selected_source": "Earliest true source: Form 8-K Exhibit 99.1 press release/final proration announcement after election deadline or at closing.",
+    "backup_sources": "8-K/A, closing 8-K, issuer/acquirer press release, final proration statement",
+    "phase": "Completion/post-election statement stage",
+    "selection_rule": "If preliminary and final differ, select earliest document that states final results, not the preliminary announcement.",
+    "source_type": "SEC post-deadline filing / press release"
+  },
+  {
+    "field": "realized_cash_election_demand",
+    "selected_source": "Earliest true source: post-deadline 8-K Exhibit 99.1 or final proration press release stating number/percentage of shares electing cash.",
+    "backup_sources": "8-K/A, final proration results statement, closing 8-K",
+    "phase": "Completion/post-election statement stage",
+    "selection_rule": "If only final proration factor is given but not demand, return null/not_found unless computable from disclosed totals.",
+    "source_type": "SEC post-deadline filing / press release"
+  },
+  {
+    "field": "realized_stock_election_demand",
+    "selected_source": "Earliest true source: post-deadline 8-K Exhibit 99.1 or final proration press release stating number/percentage of shares electing stock.",
+    "backup_sources": "8-K/A, final proration results statement, closing 8-K",
+    "phase": "Completion/post-election statement stage",
+    "selection_rule": "If only final proration factor is given but not demand, return null/not_found unless computable from disclosed totals.",
+    "source_type": "SEC post-deadline filing / press release"
+  },
+  {
+    "field": "deal_completion_or_break",
+    "selected_source": "Earliest true source: closing Form 8-K/EX-99.1 completion press release, or termination Form 8-K/EX-99.1 if broken.",
+    "backup_sources": "8-K/A, merger closing press release, termination press release, Bloomberg/WRDS status field",
+    "phase": "Completion/post-election statement stage",
+    "selection_rule": "Announcement expected-closing language is not enough. Select actual completion or termination statement.",
+    "source_type": "SEC completion/termination filing"
+  },
+  {
+    "field": "target_price",
+    "selected_source": "Market data file/API: target ticker daily/intraday OHLCV from Bloomberg, WRDS/CRSP, TAQ, Polygon, Refinitiv, or equivalent. Not in SEC transaction filing.",
+    "backup_sources": "Exchange historical data, Yahoo/yfinance for prototype only",
+    "phase": "Pre-announcement and continuously through election-making; selected as-of each trade date",
+    "selection_rule": "Use the earliest market-data timestamp required by the model window, but for trading signal use only prices timestamped before decision time.",
+    "source_type": "External market data"
+  },
+  {
+    "field": "acquirer_price",
+    "selected_source": "Market data file/API: acquirer ticker daily/intraday OHLCV from Bloomberg, WRDS/CRSP, TAQ, Polygon, Refinitiv, or equivalent. Not in SEC transaction filing.",
+    "backup_sources": "Exchange historical data, Yahoo/yfinance for prototype only",
+    "phase": "Pre-announcement and continuously through election-making; selected as-of each trade date",
+    "selection_rule": "Use price available before trade decision. Needed for stock consideration value S = exchange_ratio × acquirer_price.",
+    "source_type": "External market data"
+  },
+  {
+    "field": "deal_spread",
+    "selected_source": "Computed pipeline file, not a raw filing: deal_spread = predicted/contract value minus target_price, using legal terms plus target/acquirer prices.",
+    "backup_sources": "Bloomberg/WRDS merger-arb spread fields if available, internal calculation from terms + prices",
+    "phase": "First meaningful during/after announcement; updated continuously during election-making",
+    "selection_rule": "Earliest after the consideration terms and both prices are available. Must be recomputed when acquirer price or terms change.",
+    "source_type": "Computed external market feature"
+  },
+  {
+    "field": "volume_liquidity",
+    "selected_source": "Market data file/API: target and acquirer volume, dollar volume, bid-ask spread, ADV, TAQ/Level-1/Level-2 where available. Not in SEC transaction filing.",
+    "backup_sources": "Bloomberg/WRDS/CRSP/TAQ/Polygon/Refinitiv",
+    "phase": "Pre-announcement and continuously through election-making",
+    "selection_rule": "Use as-of historical market data only. Choose measures consistent with execution date and backtest frequency.",
+    "source_type": "External market/microstructure data"
+  },
+  {
+    "field": "borrow_cost",
+    "selected_source": "Borrow/lending vendor file/API: Bloomberg securities lending, S3, DataLend, Markit/IHS, Prime broker feed. Not in SEC transaction filing.",
+    "backup_sources": "Short-fee proxies from vendor, hard-to-borrow indicators, securities-lending desk data",
+    "phase": "Pre-announcement and continuously through election-making; selected as-of trade date",
+    "selection_rule": "Use point-in-time borrow fee available before trade. Do not substitute post-trade realized borrow cost unless labeling execution.",
+    "source_type": "External borrow/lending data"
+  },
+  {
+    "field": "borrow_availability",
+    "selected_source": "Borrow/lending vendor file/API or prime broker locate/availability feed. Not in SEC transaction filing.",
+    "backup_sources": "Bloomberg/S3/DataLend/Markit/prime broker inventory, indicative locate data",
+    "phase": "Pre-announcement and continuously through election-making; selected as-of trade date",
+    "selection_rule": "Use availability known before trade; flag if only indicative or not executable.",
+    "source_type": "External borrow/lending data"
+  },
+  {
+    "field": "short_interest",
+    "selected_source": "FINRA short interest report or vendor file that mirrors FINRA/exchange short-interest data. Not in SEC transaction filing.",
+    "backup_sources": "Bloomberg/FactSet/Refinitiv short interest fields, exchange short interest files",
+    "phase": "Pre-announcement and election-making, but lagged relative to settlement/reporting schedule",
+    "selection_rule": "Use only the latest report publicly available before the trade decision, not the later settlement period if unpublished then.",
+    "source_type": "External regulatory/market data"
+  },
+  {
+    "field": "passive_ownership",
+    "selected_source": "Computed ownership-classification file using latest available 13F holdings, ETF holdings, index membership, and manager taxonomy. Not in SEC transaction filing.",
+    "backup_sources": "Bloomberg ownership, WRDS institutional holdings, SEC 13F-HR, ETF sponsor holdings, index constituent files",
+    "phase": "Pre-announcement / latest available before election-making; lagged for 13F, fresher for ETF daily holdings",
+    "selection_rule": "Select the latest point-in-time ownership snapshot available before decision time; compute passive share using manager/fund classification rules.",
+    "source_type": "External ownership data / computed feature"
+  },
+  {
+    "field": "etf_ownership",
+    "selected_source": "ETF daily holdings files from Bloomberg/WRDS/ETF sponsors if available; otherwise latest 13F/ownership feed for ETF holders. Not in SEC transaction filing.",
+    "backup_sources": "Bloomberg ETF holdings, ETF sponsor daily holdings CSV, WRDS, 13F-HR for ETF managers",
+    "phase": "Pre-announcement and election-making; ideally daily/fresh as-of trade date",
+    "selection_rule": "Prefer ETF daily holdings over 13F if both exist. Use point-in-time files available before trade decision.",
+    "source_type": "External ETF ownership data"
+  },
+  {
+    "field": "hedge_fund_ownership",
+    "selected_source": "Computed manager-type ownership file using latest available SEC 13F-HR or Bloomberg/WRDS institutional ownership plus hedge-fund/event-driven manager classification.",
+    "backup_sources": "13F-HR, WRDS 13F, Bloomberg ownership, FactSet ownership, manual manager taxonomy",
+    "phase": "Pre-announcement / latest available before election-making; lagged",
+    "selection_rule": "Use filing publication date as availability date. Do not treat quarter-end holdings as available before the 13F filing is public.",
+    "source_type": "External ownership data / computed feature"
+  },
+  {
+    "field": "nport_on_loan",
+    "selected_source": "SEC Form N-PORT XML/filing or structured N-PORT data/API for registered funds holding target shares; extract position/fund-level securities-on-loan value where available. Not in SEC transaction filing.",
+    "backup_sources": "SEC EDGAR N-PORT, SEC N-PORT data sets, sec-api N-PORT API, Bloomberg fund lending if available",
+    "phase": "Pre-announcement / latest public report before election-making; lagged",
+    "selection_rule": "Use only N-PORT reports publicly disseminated before decision time. Map fund holdings to target security and aggregate on-loan amounts.",
+    "source_type": "External fund regulatory filing"
+  },
+  {
+    "field": "fund_lending_policy",
+    "selected_source": "Fund SAI (Statement of Additional Information), prospectus, annual/semiannual report, or fund securities-lending policy document. Not in SEC transaction filing.",
+    "backup_sources": "Fund SAI on EDGAR (N-1A-related filings), fund website securities-lending policy, annual report, N-CEN where relevant",
+    "phase": "Pre-announcement/static standing document; use latest effective version before trade decision",
+    "selection_rule": "Select the latest effective policy available before decision time; summarize recall/discretion/lending limits if stated.",
+    "source_type": "External fund regulatory/policy filing"
+  },
+  {
+    "field": "lending_control_rule",
+    "selected_source": "MSLA/GMSLA template plus fund SAI/lending agreement disclosure explaining who controls voting/election/recall rights on lent shares. Not in SEC transaction filing.",
+    "backup_sources": "Fund SAI/prospectus language, securities lending agreement disclosure, legal template, counsel memo, manual legal research",
+    "phase": "Pre-announcement/static legal control assumption; resolved before model build",
+    "selection_rule": "This is not usually a deal-specific numeric field. Store as legal assumption/evidence: retained fund rights, borrower rights, recall mechanics, and uncertainty flag.",
+    "source_type": "External legal/policy document"
+  }
+]
