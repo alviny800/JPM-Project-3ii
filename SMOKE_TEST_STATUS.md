@@ -1,6 +1,6 @@
 # Smoke Test Status
 
-Run date: 2026-06-17 America/Los_Angeles
+Run date: 2026-06-26 America/Los_Angeles
 
 ## What ran
 
@@ -64,13 +64,20 @@ Missing required evidence in this smoke test:
 
 ## Claude API Send Status
 
-`--llm-stage send` was attempted after prepare, but the Anthropic API returned:
+`--llm-stage send` now runs with Claude using `claude-sonnet-4-6` and `--llm-max-tokens 12000`. The Celgene/Bristol-Myers smoke extraction wrote `llm_field_extractions.csv` and returned the key fixed consideration terms:
 
-```text
-401 Client Error: Unauthorized for url: https://api.anthropic.com/v1/messages
-```
+- `$50.00` cash per Celgene share.
+- `1.0` Bristol-Myers Squibb share per Celgene share.
+- One tradeable CVR per Celgene share.
+- Record date: March 1, 2019.
 
-So the direct Claude API extraction did not produce `llm_field_results.jsonl` or `llm_field_extractions.csv`. The payload file is ready for a rerun once a valid Anthropic API key is available.
+Fields that are not applicable to this fixed cash-and-stock deal, such as cash/stock election caps and proration formula, correctly return as not found instead of being fabricated.
+
+## WRDS Ownership And Market Status
+
+The WRDS ownership helper resolves historical Celgene through CRSP and writes ETF/passive ownership outputs. In the live smoke run, `ownership_mix_by_event.csv` returned `etf_ownership_percent=0.153286`.
+
+The WRDS market helper resolves both Celgene and Bristol-Myers Squibb through CRSP and writes market outputs. In the live smoke run, `event_market_features.csv` returned target price `80.43`, acquirer price `45.12`, simple contract value `95.12`, and deal spread `14.69` on 2019-01-03. The simple contract value excludes the CVR because no market CVR value is supplied by the SEC terms.
 
 ## Note
 

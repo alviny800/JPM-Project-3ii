@@ -10,9 +10,11 @@ See `Field_File_Timeline_Guide.md` for the English field-file-timeline specifica
 - `field_specs.json` — canonical SEC field definitions, preferred SEC forms, document keys, release timing, keywords, and required/conditional flags.
 - `Field_File_Timeline_Guide.md` — English guide for project members and Claude prompt design.
 - `download_ownership_etf_data.py` — separate ownership/ETF helper; not a replacement for SEC filing extraction.
+- `download_wrds_market_data.py` — WRDS CRSP market/trading helper for target/acquirer prices, liquidity, shares, market cap, and deal-spread features.
+- `build_election_strategy_model.py` — local merge/audit/model script that combines SEC/Claude, WRDS ownership, and WRDS market outputs into model-ready rows and v1 strategy signals.
 - `secapi_io_fulltext_ma_screen.py` — optional sec-api.io full-text helper.
 - `reference/` — canonical field/source map CSV, JSON, and Word document used to define which fields Claude should return and which source family each field belongs to.
-- `SMOKE_TEST_STATUS.md` — status of the Celgene/Bristol-Myers smoke test and the current Claude API send blocker.
+- `SMOKE_TEST_STATUS.md` — status of the Celgene/Bristol-Myers SEC, Claude, WRDS ownership, and WRDS market smoke tests.
 
 ## What the SEC script covers
 
@@ -86,6 +88,8 @@ python download_ma_edgar_files.py \
   --field-specs field_specs.json \
   --field-locator-top-k 3 \
   --claude-package-max-docs-per-event 10 \
+  --llm-model claude-sonnet-4-6 \
+  --llm-max-tokens 12000 \
   --llm-stage send
 ```
 
@@ -96,6 +100,94 @@ This writes:
 - `llm_field_extractions.csv`
 
 Claude is instructed to return a `fields` object with every requested canonical field. If a field is not supported by the retrieved evidence, it must return `value=null` and `basis="not_found"` rather than omitting the field.
+
+## ETF / passive ownership from WRDS
+
+Use `download_ownership_etf_data.py` after the SEC run to add target ETF ownership and passive-control features. The WRDS provider first tries to resolve each target into CRSP identifiers (`permno`, CUSIP, ticker), then queries a fund-holdings table and converts ETF-held shares into `etf_ownership_percent` when CRSP shares outstanding are available.
+
+Dry-run request plan:
+
+```bash
+python download_ownership_etf_data.py \
+  --input smoke_celgene_prepare/candidate_events.csv \
+  --output-dir smoke_celgene_ownership_wrds_plan \
+  --provider wrds \
+  --dry-run
+```
+
+Live WRDS run:
+
+```bash
+export WRDS_USERNAME="your_wrds_username"
+read -s WRDS_PASSWORD
+printf '%s\n' "$WRDS_PASSWORD" | \
+python download_ownership_etf_data.py \
+  --input smoke_celgene_prepare/candidate_events.csv \
+  --output-dir smoke_celgene_ownership_wrds \
+  --provider wrds \
+  --wrds-password-stdin \
+  --cik-matches smoke_celgene_prepare/cik_name_matches.csv
+```
+
+The default WRDS configuration assumes CRSP-style names: `crsp.stocknames`, `crsp_q_mutualfunds.holdings`, `crsp_q_mutualfunds.fund_hdr`, and `crsp.dsf`. If your WRDS subscription exposes ETF holdings under different libraries/tables, override the `--wrds-...` table and column arguments rather than editing code.
+
+WRDS/FMP ownership outputs:
+
+- `event_symbol_map.csv` — event-level target/acquirer identifiers, including WRDS `permno`/CUSIP when available.
+- `wrds_security_map.csv` — WRDS security lookup diagnostics for CRSP identifier matching.
+- `etf_holders_of_target.csv` — ETF/index-fund rows holding the target, with shares, market value, fund metadata, and `ownership_percent` when computable.
+- `ownership_mix_by_event.csv` — event-level aggregate `etf_shares_or_exposure`, `etf_ownership_percent`, and `passive_control_percent` for model merge.
+
+Historical targets are often delisted, so SEC current ticker matching may be missing or wrong. If WRDS name lookup is ambiguous, fill `symbol_overrides_template.csv` with `event_idx,side,symbol,permno,cusip,note` and rerun using `--symbol-overrides`.
+
+## Market / trading data from WRDS
+
+Use `download_wrds_market_data.py` after the SEC/Claude run to add market variables from WRDS CRSP. It resolves target and acquirer identifiers through CRSP `stocknames`, then pulls `crsp.dsf` daily rows around the announcement date.
+
+```bash
+export WRDS_USERNAME="your_wrds_username"
+read -s WRDS_PASSWORD
+printf '%s\n' "$WRDS_PASSWORD" | \
+python download_wrds_market_data.py \
+  --input ma_field_locator/candidate_events.csv \
+  --output-dir ma_market_wrds \
+  --wrds-password-stdin \
+  --cik-matches ma_field_locator/cik_name_matches.csv \
+  --llm-extractions ma_field_locator_claude/llm_field_extractions.csv \
+  --include-short-volume
+```
+
+Market outputs:
+
+- `wrds_security_map.csv` — CRSP identifier lookup diagnostics for target and acquirer.
+- `wrds_market_daily.csv` — daily CRSP rows for the requested event window.
+- `wrds_market_snapshot.csv` — as-of target/acquirer price, volume, dollar volume, ADV20/ADV60, bid-ask spread, shares outstanding, and market cap.
+- `event_market_features.csv` — event-level `target_price`, `acquirer_price`, `simple_contract_value`, and `deal_spread` when SEC/Claude terms include cash and exchange ratio.
+- `missing_market_data_inventory.csv` — explicit inventory of market fields that remain unavailable from the detected WRDS tables, such as true short interest, borrow cost, borrow availability, N-PORT on-loan balances, and fund lending policies.
+
+`--include-short-volume` uses the configured WRDS short-volume table as a proxy only. It is not a substitute for true short-interest positions or securities-lending/borrow data.
+
+## Model panel and v1 strategy signal
+
+After SEC/Claude, ownership, and market runs finish, build the local model panel and coverage audit:
+
+```bash
+python build_election_strategy_model.py \
+  --events ma_field_locator/candidate_events.csv \
+  --llm-extractions ma_field_locator_claude/llm_field_extractions.csv \
+  --ownership-mix ma_ownership_wrds/ownership_mix_by_event.csv \
+  --market-features ma_market_wrds/event_market_features.csv \
+  --output-dir ma_model_v1
+```
+
+This writes:
+
+- `model_input_panel.csv` — one row per event with legal terms, ownership, and market features merged.
+- `variable_coverage_report.csv` — available/missing/not-applicable status for each modeling field.
+- `election_model_predictions.csv` — v1 proration/EV/hedge/signal output when the event has an actual election/proration structure.
+- `model_run_summary.json` — compact run summary.
+
+The script is intentionally conservative. Fixed-consideration deals with no shareholder election are blocked as `fixed_consideration_no_shareholder_election`; missing caps, proration formulas, or default rules block the proration model instead of fabricating a signal.
 
 ## Coverage gate
 

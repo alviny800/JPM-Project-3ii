@@ -101,6 +101,8 @@ Claude must return exactly one JSON object. It must include every field in `requ
 3. The output `event_field_coverage.csv` is the mandatory audit gate. A required field with `missing_required=True` means the retrieved SEC evidence is not sufficient and the event should be re-searched or manually reviewed.
 4. The output `claude_field_payloads.jsonl` and `claude_upload_packages/` must tell Claude exactly which canonical fields are requested and which document/snippet is the candidate evidence for each field.
 5. If `--llm-stage send` is used with an Anthropic API key, the script sends field-level payloads and writes `llm_field_results.jsonl` and `llm_field_extractions.csv`.
+6. The ownership helper should be run separately for `passive_ownership` and `etf_ownership`. For WRDS, resolve historical target identifiers through CRSP `stocknames` or an override file, pull the latest point-in-time ETF/fund holdings snapshot available before the decision date, and divide ETF-held shares by contemporaneous shares outstanding when available. Store the result in `ownership_mix_by_event.csv` as `etf_ownership_percent` / `passive_control_percent`; do not mix these external fields into the SEC legal-term extraction contract.
+7. The market helper should be run separately for `target_price`, `acquirer_price`, `deal_spread`, and liquidity fields. It should resolve target/acquirer identifiers through CRSP `stocknames`, pull point-in-time CRSP daily data from WRDS, and merge the resulting prices with Claude-extracted legal terms. Store the result in `event_market_features.csv`; unavailable borrow/short/lending fields must be tracked in `missing_market_data_inventory.csv` rather than silently treated as zero.
 
 ## Recommended Command
 
@@ -137,5 +139,53 @@ python download_ma_edgar_files.py \
   --field-specs field_specs.json \
   --field-locator-top-k 3 \
   --claude-package-max-docs-per-event 10 \
+  --llm-model claude-sonnet-4-6 \
+  --llm-max-tokens 12000 \
   --llm-stage send
 ```
+
+To add ETF passive-control inputs through WRDS:
+
+```bash
+export WRDS_USERNAME="your_wrds_username"
+read -s WRDS_PASSWORD
+printf '%s\n' "$WRDS_PASSWORD" | \
+python download_ownership_etf_data.py \
+  --input ma_field_locator/candidate_events.csv \
+  --output-dir ma_ownership_wrds \
+  --provider wrds \
+  --wrds-password-stdin \
+  --cik-matches ma_field_locator/cik_name_matches.csv
+```
+
+Use `--dry-run` first to write `event_symbol_map.csv` and `ownership_request_plan.csv` without opening a WRDS connection. If a historical target cannot be resolved cleanly, edit the generated `symbol_overrides_template.csv` with `symbol`, `permno`, or `cusip`, then rerun with `--symbol-overrides`.
+
+To add market/trading inputs through WRDS:
+
+```bash
+export WRDS_USERNAME="your_wrds_username"
+read -s WRDS_PASSWORD
+printf '%s\n' "$WRDS_PASSWORD" | \
+python download_wrds_market_data.py \
+  --input ma_field_locator/candidate_events.csv \
+  --output-dir ma_market_wrds \
+  --wrds-password-stdin \
+  --cik-matches ma_field_locator/cik_name_matches.csv \
+  --llm-extractions ma_field_locator_claude/llm_field_extractions.csv \
+  --include-short-volume
+```
+
+Use `--dry-run` first to write `event_security_map.csv` and `wrds_market_request_plan.csv`. The default market source is `crsp.dsf`; override the `--wrds-market-...` arguments if the WRDS subscription exposes the needed fields under a different library or table. `--include-short-volume` is a short-volume proxy only; true short-interest positions, borrow cost, borrow availability, N-PORT on-loan balances, and fund lending policy require additional vendor subscriptions or future EDGAR fund-filing parsers.
+
+To merge available fields and run the local v1 model/strategy signal:
+
+```bash
+python build_election_strategy_model.py \
+  --events ma_field_locator/candidate_events.csv \
+  --llm-extractions ma_field_locator_claude/llm_field_extractions.csv \
+  --ownership-mix ma_ownership_wrds/ownership_mix_by_event.csv \
+  --market-features ma_market_wrds/event_market_features.csv \
+  --output-dir ma_model_v1
+```
+
+The model script should never infer a tradable election edge when the legal terms say the deal has no shareholder election, or when caps/proration/default mechanics are missing. In those cases it must write a blocked status and preserve the missing-variable explanation for review.

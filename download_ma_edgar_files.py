@@ -1160,7 +1160,15 @@ def call_anthropic(llm_payload: Dict[str, Any], api_key: str, model: str, max_to
     try:
         parsed = json.loads(text)
     except Exception:
-        parsed = {"parse_error": True, "raw_text": text}
+        start = text.find("{")
+        end = text.rfind("}")
+        if start >= 0 and end > start:
+            try:
+                parsed = json.loads(text[start:end + 1])
+            except Exception:
+                parsed = {"parse_error": True, "raw_text": text, "stop_reason": data.get("stop_reason", "")}
+        else:
+            parsed = {"parse_error": True, "raw_text": text, "stop_reason": data.get("stop_reason", "")}
     return {
         "provider": "anthropic",
         "model": model,
@@ -1585,12 +1593,12 @@ def parse_args() -> argparse.Namespace:
                    help="off: no LLM work; prepare: write per-event JSONL payloads only; send: call provider and aggregate responses.")
     p.add_argument("--llm-provider", choices=["anthropic"], default="anthropic",
                    help="LLM provider used when --llm-stage send.")
-    p.add_argument("--llm-model", default="claude-3-5-sonnet-20241022", help="Claude/LLM model name.")
+    p.add_argument("--llm-model", default="claude-sonnet-4-6", help="Claude/LLM model name.")
     p.add_argument("--llm-max-docs-per-event", type=int, default=12,
                    help="Maximum text documents included in each event-level LLM payload.")
     p.add_argument("--llm-max-doc-chars", type=int, default=80_000,
                    help="Maximum cleaned characters retained per document for LLM payloads.")
-    p.add_argument("--llm-max-tokens", type=int, default=4096, help="Max tokens requested from the LLM.")
+    p.add_argument("--llm-max-tokens", type=int, default=12000, help="Max tokens requested from the LLM.")
     p.add_argument("--field-specs", default=None,
                    help="Optional field_specs.json path. Defaults to ./field_specs.json or built-in specs.")
     p.add_argument("--min-field-score", type=int, default=1,

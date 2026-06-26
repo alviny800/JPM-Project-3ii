@@ -1,0 +1,351 @@
+\documentclass[aspectratio=169,11pt]{beamer}
+
+\usetheme{Madrid}
+\usecolortheme{dolphin}
+\usepackage{amsmath}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{hyperref}
+\usepackage{xcolor}
+
+\setbeamertemplate{navigation symbols}{}
+\setbeamertemplate{footline}[frame number]
+\hypersetup{colorlinks=true,urlcolor=blue,linkcolor=blue}
+
+\title[Pipeline Validation]{Corporate-Action Election Arbitrage}
+\subtitle{Week Update: SEC/Claude/WRDS pipeline validation}
+\author{JPM Project 3ii}
+\date{\today}
+
+\newcommand{\usd}[1]{\$#1}
+
+\begin{document}
+
+\begin{frame}
+  \titlepage
+\end{frame}
+
+\begin{frame}{This Week's Message}
+\small
+\textbf{The pipeline now runs end to end on an actual election deal.}
+
+\vspace{0.6em}
+\begin{itemize}
+  \item We can identify whether a merger is truly an election/proration deal.
+  \item We can retrieve the relevant public SEC files instead of manually searching deal documents.
+  \item We can send those files to Claude and receive the canonical fields needed for the project.
+  \item We can join WRDS market data and ETF/index-fund ownership data onto the same event.
+  \item The resulting event row is sufficient to compute alpha and construct the election-arbitrage strategy.
+\end{itemize}
+
+\vspace{0.7em}
+\textbf{Smoke test used in this update:} Andeavor / Marathon Petroleum, announced April 30, 2018.
+\end{frame}
+
+\begin{frame}{End-to-End Pipeline}
+\small
+\begin{enumerate}
+  \item \textbf{Deal screen:} identify candidate M\&A events and reject non-election deals.
+  \item \textbf{SEC retrieval:} download S-4, 424B3, 8-K, and later 10-Q/10-K filings around the transaction timeline.
+  \item \textbf{Claude extraction:} submit the relevant filing package and map text evidence into canonical deal fields.
+  \item \textbf{WRDS join:} add announcement-date market variables and ETF/index-fund ownership.
+  \item \textbf{Strategy table:} output coverage, predicted value, alpha, hedge ratio, and trade signal.
+\end{enumerate}
+
+\vspace{0.7em}
+\scriptsize
+Main scripts: \texttt{download\_ma\_edgar\_files.py}, \texttt{download\_ownership\_etf\_data.py}, \texttt{download\_wrds\_market\_data.py}, \texttt{build\_election\_strategy\_model.py}.
+\end{frame}
+
+\begin{frame}{1. Deal Screen Works}
+\small
+\textbf{Negative control: Celgene / Bristol-Myers Squibb}
+
+\vspace{0.5em}
+\begin{tabular}{ll}
+\toprule
+Announcement & January 3, 2019 \\
+Extracted consideration & \usd{50} cash + 1 BMY share + 1 CVR per CELG share \\
+Election mechanics & None found \\
+Caps / proration & Not applicable \\
+Pipeline decision & Fixed mixed-consideration merger, not an election deal \\
+Strategy output & No trade \\
+\bottomrule
+\end{tabular}
+
+\vspace{0.8em}
+\textbf{Why this matters.} The system does not mistakenly build an election strategy when the deal has no shareholder election.
+\end{frame}
+
+\begin{frame}{2. SEC File Retrieval Works}
+\small
+\textbf{Election test case: Andeavor / Marathon Petroleum}
+
+\vspace{0.5em}
+\begin{tabular}{p{0.28\linewidth}p{0.26\linewidth}p{0.34\linewidth}}
+\toprule
+\textbf{Filing} & \textbf{Date} & \textbf{Pipeline use} \\
+\midrule
+S-4/A & July 20, 2018 & Deal terms and election mechanics \\
+424B3 joint proxy/prospectus & August 3, 2018 & Main pre-election source for terms/caps/default rule \\
+8-K closing filing & October 1, 2018 & Closing and preliminary allocation evidence \\
+10-Q acquisition note & November 5, 2018 & Final consideration allocation label \\
+\bottomrule
+\end{tabular}
+
+\vspace{0.7em}
+\scriptsize
+SEC sources include \href{https://www.sec.gov/Archives/edgar/data/1510295/000119312518238270/0001193125-18-238270.txt}{424B3 filing} and \href{https://www.sec.gov/Archives/edgar/data/1510295/000151029518000215/mpc-20180930x10q.htm}{MPC 2018 Q3 10-Q}.
+\end{frame}
+
+\begin{frame}{3. Claude Extraction Works}
+\small
+\textbf{Claude returned the fields needed from the filing package.}
+
+\vspace{0.5em}
+\begin{tabular}{p{0.34\linewidth}p{0.50\linewidth}}
+\toprule
+\textbf{Canonical field} & \textbf{Extracted value for Andeavor/MPC} \\
+\midrule
+Consideration menu & Cash election or stock election \\
+Cash consideration & \usd{152.27} per ANDV share \\
+Stock consideration & 1.87 MPC shares per ANDV share \\
+Cash cap & 22,885,359 ANDV shares, about 15\% \\
+Stock cap & Remainder, about 85\% \\
+Proration formula & Cash/stock oversubscription allocated by cap ratios \\
+Default rule & No/late/invalid/revoked election is deemed stock \\
+Election deadline & 5:00 p.m. ET two trading days before closing, unless changed \\
+\bottomrule
+\end{tabular}
+\end{frame}
+
+\begin{frame}{4. WRDS Market Join Works}
+\small
+\textbf{Announcement-date market variables were retrieved and joined to the event.}
+
+\vspace{0.5em}
+\begin{tabular}{lr}
+\toprule
+\textbf{WRDS market field} & \textbf{Value} \\
+\midrule
+ANDV target price & \usd{138.32} \\
+MPC acquirer price & \usd{74.91} \\
+Stock-election value, $1.87 \times P_{MPC}$ & \usd{140.08} \\
+Cash-election value & \usd{152.27} \\
+Best menu value before proration & \usd{152.27} \\
+Best menu spread before proration & \usd{13.95} per ANDV share \\
+Target ADV20 & 2.53 million shares \\
+Target market cap & \usd{20.9} billion \\
+\bottomrule
+\end{tabular}
+\end{frame}
+
+\begin{frame}{5. WRDS Ownership Join Works}
+\small
+\textbf{The missing ETF/passive ownership variable is now in the event row.}
+
+\vspace{0.6em}
+\begin{tabular}{lr}
+\toprule
+\textbf{Ownership field} & \textbf{Value} \\
+\midrule
+Historical target ticker & ANDV \\
+WRDS/CRSP PERMNO & 37284 \\
+Matched CUSIP & 03349M10 \\
+ETF/index-fund shares or exposure & 26.75 million shares \\
+ETF/index-fund holder count & 232 \\
+ETF/index-fund market value & \usd{3.70} billion \\
+Passive ownership estimate & 17.7\% of target shares \\
+\bottomrule
+\end{tabular}
+
+\vspace{0.7em}
+\textbf{Pipeline implication.} The previously missing passive-control variable can now be pulled systematically from WRDS for candidate events.
+\end{frame}
+
+\begin{frame}{Joined Event Row Is Modeling-Ready}
+\small
+\begin{tabular}{p{0.30\linewidth}p{0.18\linewidth}p{0.40\linewidth}}
+\toprule
+\textbf{Data group} & \textbf{Status} & \textbf{Use in alpha/strategy} \\
+\midrule
+Consideration menu & Available & Defines cash vs. stock election choices \\
+Cash and stock values & Available & Determines higher-value election \\
+Cash/stock caps & Available & Determines proration constraint \\
+Default rule & Available & Needed for passive-election behavior \\
+WRDS target/acquirer prices & Available & Prices each menu option and current target cost \\
+WRDS liquidity fields & Available & Capacity and trading-cost checks \\
+WRDS passive ownership & Available & Passive-control input now populated \\
+Final allocation label & Available & Useful for backtest validation \\
+Raw election demand label & Not found & Not required for entry-time alpha calculation \\
+\bottomrule
+\end{tabular}
+\end{frame}
+
+\begin{frame}{Formula Bridge: Fields To Payoffs}
+\small
+\textbf{The extracted fields map directly into the two election payoffs.}
+
+\vspace{0.4em}
+\begin{align*}
+C &= \text{cash consideration per target share} = \usd{152.27} \\
+r &= \text{stock exchange ratio} = 1.87 \\
+P_A &= \text{acquirer price at signal date} = \usd{74.91} \\
+P_T &= \text{target price at signal date} = \usd{138.32}
+\end{align*}
+
+\vspace{0.2em}
+\begin{align*}
+V_{cash} &= C = \usd{152.27} \\
+V_{stock} &= r \times P_A = 1.87 \times \usd{74.91} = \usd{140.08} \\
+\text{favored election} &= \arg\max(V_{cash}, V_{stock}) = \text{cash}
+\end{align*}
+
+\vspace{0.3em}
+\textbf{Pipeline point.} SEC supplies $C$ and $r$; WRDS supplies $P_A$ and $P_T$; the joined row can price both choices.
+\end{frame}
+
+\begin{frame}{Formula Bridge: Proration To EV}
+\small
+\textbf{The strategy table then converts election demand and caps into expected consideration.}
+
+\vspace{0.3em}
+\begin{align*}
+K_{cash} &= \text{cash cap fraction} = 15.0\% \\
+D_{cash} &= \text{predicted cash-election demand} = 71.7\% \\
+f_{cash} &= \min\left(1,\frac{K_{cash}}{D_{cash}}\right)
+          = \min\left(1,\frac{15.0\%}{71.7\%}\right)
+          = 20.9\%
+\end{align*}
+
+\vspace{0.2em}
+\begin{align*}
+EV
+&= f_{cash} \times V_{cash} + (1-f_{cash}) \times V_{stock} \\
+&= 20.9\% \times \usd{152.27}
+   + 79.1\% \times \usd{140.08} \\
+&= \usd{142.63}
+\end{align*}
+
+\vspace{0.2em}
+\textbf{Readout.} If a cash election is only partially filled, the unfilled piece receives stock consideration.
+\end{frame}
+
+\begin{frame}{Alpha Calculation Can Be Produced}
+\small
+\textbf{Alpha is calculated directly from expected consideration value versus the current target price.}
+
+\vspace{0.4em}
+\begin{align*}
+\alpha_{gross}
+&= EV - P_T \\
+&= \usd{142.63} - \usd{138.32} \\
+&= \usd{4.31}\ \text{per ANDV share}
+\end{align*}
+
+\vspace{0.2em}
+\begin{align*}
+\text{Trading cost} &= 10\text{ bps} \times P_T
+                    = 0.001 \times \usd{138.32}
+                    = \usd{0.14} \\
+\text{Borrow cost} &= \usd{0.00}\ \text{in the current smoke test}
+\end{align*}
+
+\vspace{0.2em}
+\[
+\alpha_{net}
+= \usd{4.31} - \usd{0.14} - \usd{0.00}
+= \usd{4.17}\ \text{per ANDV share}
+\]
+\end{frame}
+
+\begin{frame}{Arbitrage Strategy Row Can Be Produced}
+\small
+\textbf{The same row also gives the hedge ratio and implementable paper trade.}
+
+\vspace{0.4em}
+\begin{align*}
+\text{Target leg} &= +1.000\ \text{ANDV share} \\
+\text{Election instruction} &= \text{elect cash} \\
+\text{Expected stock receipt} &= (1-f_{cash}) \times r \\
+&= (1-20.9\%) \times 1.87 \\
+&= 1.479\ \text{MPC shares per ANDV share}
+\end{align*}
+
+\vspace{0.2em}
+\[
+\text{Hedged position}
+= +1.000\ \text{ANDV}
+-1.479\ \text{MPC}
++ \text{cash election right}
+\]
+
+\vspace{0.3em}
+\textbf{Strategy output.} Favored election = cash; hedge ratio = 1.479 MPC short per ANDV long; signal = \texttt{paper\_trade}.
+\end{frame}
+
+\begin{frame}{Final Proration Label Search}
+\small
+\textbf{Final allocation was found, but not in an obvious standalone proration release.}
+
+\vspace{0.5em}
+\begin{itemize}
+  \item MPC's 2018 Q3 10-Q discloses the final allocation for the Andeavor acquisition.
+  \item Approximately 22.9 million ANDV shares converted into cash consideration.
+  \item The remaining approximately 128.2 million ANDV shares converted into stock consideration.
+  \item Former ANDV holders received approximately 239.8 million MPC shares and approximately \usd{3.5} billion cash.
+\end{itemize}
+
+\vspace{0.5em}
+\textbf{Remaining label gap.} The retrieved public evidence did not disclose raw cash-election demand or raw stock-election demand, so exact realized fill rates remain hidden for this sample.
+
+\vspace{0.4em}
+\scriptsize
+Source: \href{https://www.sec.gov/Archives/edgar/data/1510295/000151029518000215/mpc-20180930x10q.htm}{MPC 2018 Q3 10-Q, Note 5, Acquisition of Andeavor}.
+\end{frame}
+
+\begin{frame}{Output Files From The Smoke Test}
+\small
+\textbf{The run emits auditable intermediate files and final strategy outputs.}
+
+\vspace{0.5em}
+\begin{itemize}
+  \item \texttt{/private/tmp/jpm\_andeavor\_manual\_terms/llm\_field\_extractions.csv}
+  \item \texttt{/private/tmp/jpm\_andeavor\_market\_wrds\_v2/event\_market\_features.csv}
+  \item \texttt{/private/tmp/jpm\_andeavor\_ownership\_wrds/ownership\_mix\_by\_event.csv}
+  \item \texttt{/private/tmp/jpm\_andeavor\_model\_v1\_v3/model\_input\_panel.csv}
+  \item \texttt{/private/tmp/jpm\_andeavor\_model\_v1\_v3/variable\_coverage\_report.csv}
+  \item \texttt{/private/tmp/jpm\_andeavor\_model\_v1\_v3/election\_model\_predictions.csv}
+\end{itemize}
+
+\vspace{0.5em}
+\textbf{Quality checks.} The non-election control is blocked; the election sample produces one complete strategy row.
+\end{frame}
+
+\begin{frame}{What This Proves}
+\small
+\begin{tabular}{p{0.40\linewidth}p{0.42\linewidth}}
+\toprule
+\textbf{Question} & \textbf{Current answer} \\
+\midrule
+Can we find the right deal files? & Yes: S-4/A, 424B3, 8-K, and post-close 10-Q were retrieved for Andeavor/MPC. \\
+Can Claude extract the needed variables? & Yes: consideration, caps, exchange ratio, formula, default rule, and deadline were extracted. \\
+Can WRDS fill the missing data? & Yes: market/trading variables and ETF/passive ownership were joined. \\
+Is the event row sufficient for alpha? & Yes: expected value, gross alpha, costs, and net alpha were produced. \\
+Is it sufficient for strategy construction? & Yes: favored election, target leg, hedge ratio, and signal were produced. \\
+\bottomrule
+\end{tabular}
+\end{frame}
+
+\begin{frame}{Next Pipeline Steps}
+\small
+\begin{enumerate}
+  \item Run the same pipeline on several more true cash-or-stock election deals.
+  \item Add automatic post-close label search in 10-Q/10-K acquisition notes, not only 8-K filings.
+  \item Keep raw election demand as an optional label: useful if found, but not blocking for entry-time alpha.
+  \item Convert the smoke-test outputs into a small reproducible backtest panel.
+  \item Prepare a cleaner mentor-facing appendix with one row per deal: files found, Claude fields, WRDS fields, alpha, and strategy signal.
+\end{enumerate}
+\end{frame}
+
+\end{document}
