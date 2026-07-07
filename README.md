@@ -12,6 +12,7 @@ See `Field_File_Timeline_Guide.md` for the English field-file-timeline specifica
 - `download_ownership_etf_data.py` — separate ownership/ETF helper; not a replacement for SEC filing extraction.
 - `download_wrds_market_data.py` — WRDS CRSP market/trading helper for target/acquirer prices, liquidity, shares, market cap, and deal-spread features.
 - `build_election_strategy_model.py` — local merge/audit/model script that combines SEC/Claude, WRDS ownership, and WRDS market outputs into model-ready rows and v1 strategy signals.
+- `election_arb_eda.py` — Week-3 exploratory data analysis and statistical tests. Merges the Claude extraction, WRDS ownership, and WRDS market outputs into a deal-level panel, then fits the empirical active-investor election function `p_active(spread)` with supporting plots and OLS/K-S tests.
 - `secapi_io_fulltext_ma_screen.py` — optional sec-api.io full-text helper.
 - `reference/` — canonical field/source map CSV, JSON, and Word document used to define which fields Claude should return and which source family each field belongs to.
 - `SMOKE_TEST_STATUS.md` — status of the Celgene/Bristol-Myers SEC, Claude, WRDS ownership, and WRDS market smoke tests.
@@ -188,6 +189,27 @@ This writes:
 - `model_run_summary.json` — compact run summary.
 
 The script is intentionally conservative. Fixed-consideration deals with no shareholder election are blocked as `fixed_consideration_no_shareholder_election`; missing caps, proration formulas, or default rules block the proration model instead of fabricating a signal.
+
+## Week-3 EDA and p_active(spread) fitting
+
+`election_arb_eda.py` consumes the three pipeline outputs and produces the empirical analysis behind the structural model — the distribution of realized cash-election demand, its response to the deadline-date spread, and a fitted `p_active(spread)` function for the Monte Carlo.
+
+```bash
+python election_arb_eda.py \
+  --extractions ma_field_locator_claude/llm_field_extractions.csv \
+  --ownership ma_ownership_wrds/ownership_mix_by_event.csv \
+  --market ma_market_wrds/event_market_features.csv \
+  --output-dir eda_output
+```
+
+This writes:
+
+- `eda_output/merged_panel.csv` — deal-level panel joining legal terms, ownership, and market features, with derived columns (realized cash share, deadline spread, backed-out active-investor cash-election rate).
+- `eda_output/plots/*.png` — realized-cash-share histogram, spread-vs-active-election scatter (the key chart), demand-vs-cap, election-by-default-rule, passive-ownership interaction, and time-series plots.
+- `eda_output/tables/*.csv` — OLS coefficients, a K-S test that the default rule matters, and the fitted `active_election_function.csv` (`p_active(spread)`).
+- `eda_output/eda_summary.md` — narrative summary with the V1 modeling assumptions and caveats.
+
+The active-investor cash-election rate is backed out by treating lent/passive shares as taking the default rule, then attributing residual realized demand to the active population. It is fit as a simple linear `p_active(spread)` for V1; a logistic or piecewise form can replace it later. Post-election fields (`final_proration_results`, realized demand) are used only as calibration labels, never as trade-entry features.
 
 ## Coverage gate
 

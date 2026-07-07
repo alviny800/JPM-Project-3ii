@@ -25,6 +25,35 @@
   \titlepage
 \end{frame}
 
+\begin{frame}{Weekly To-Do}
+\small
+\begin{columns}[T]
+\begin{column}{0.48\linewidth}
+\textbf{Accomplished this week}
+\begin{itemize}
+  \item WRDS Python API set up; credentials saved to \texttt{.pgpass}.
+  \item Verified \texttt{tr\_13f} (institutional 13F) is full-access via WRDS; FMP subscription officially not needed.
+  \item Capital IQ access ruled out (listed in catalog but permission-denied on query).
+  \item SDC M\&A sample confirmed inadequate (one week of March 2016).
+  \item Pulled colleague's WRDS pipeline updates: market-data puller, ownership WRDS provider, and \texttt{build\_election\_strategy\_model.py}.
+  \item Drafted Week 3 EDA script (\texttt{election\_arb\_eda.py}) on \texttt{feat/week3-eda-script}.
+  \item Pulled Bloomberg M\&A universe (607 deals, 2006+), diagnosed filter issue: US targets under-represented, famous election deals (Anadarko/Oxy, Sherwin-Williams/Valspar, etc.) missing.
+\end{itemize}
+\end{column}
+\begin{column}{0.48\linewidth}
+\textbf{To do next week}
+\begin{itemize}
+  \item Re-pull Bloomberg with explicit Target Country = United States filter; expect $\approx 1{,}500$--$2{,}500$ deals and $\sim 80$--$200$ true election deals.
+  \item Verify known election deals (Andeavor/MPC, Anadarko/Oxy) appear in the corrected universe before downloading.
+  \item Run SEC/Claude + WRDS market + WRDS ownership pipelines on the corrected universe.
+  \item Run EDA script on real outputs; produce histograms, spread-vs-election scatter, and statistical tests.
+  \item Build structural Monte Carlo for $p_{\text{active}}(\text{spread})$; calibrate active-investor election propensity from the empirical data.
+  \item Reframe deliverable as structural framework + case-study validation if $N$ of election deals stays small.
+\end{itemize}
+\end{column}
+\end{columns}
+\end{frame}
+
 \begin{frame}{This Week's Message}
 \small
 \textbf{The pipeline now runs end to end on an actual election deal.}

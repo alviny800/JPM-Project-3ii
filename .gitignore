@@ -15,3 +15,16 @@ ma_export_*.csv
 # intentional and small.
 llm_field_results*.jsonl
 llm_field_extractions*.csv
+
+# Python virtual environment
+.venv/
+
+# Licensed data (Bloomberg M&A pull, CRSP/WRDS) — keep local, do NOT commit
+BBG Data Pull*.csv
+US_election_deals_for_analysis.csv
+stocknames_cache.csv
+cusip_backfill_election/
+cusip_manual_overrides.csv
+
+# Backfill run logs
+cusip_backfill*.log
