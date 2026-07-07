@@ -189,3 +189,15 @@ python build_election_strategy_model.py \
 ```
 
 The model script should never infer a tradable election edge when the legal terms say the deal has no shareholder election, or when caps/proration/default mechanics are missing. In those cases it must write a blocked status and preserve the missing-variable explanation for review.
+
+Finally, to run the Week-3 exploratory analysis and fit the empirical active-investor election function:
+
+```bash
+python election_arb_eda.py \
+  --extractions ma_field_locator_claude/llm_field_extractions.csv \
+  --ownership ma_ownership_wrds/ownership_mix_by_event.csv \
+  --market ma_market_wrds/event_market_features.csv \
+  --output-dir eda_output
+```
+
+This writes a deal-level `merged_panel.csv`, diagnostic plots, OLS/K-S tables, and `active_election_function.csv` — the fitted `p_active(spread)` used to calibrate active-investor election propensity in the structural model. Post-election fields (`final_proration_results`, realized demand) are used only as calibration labels, never as trade-entry features.
