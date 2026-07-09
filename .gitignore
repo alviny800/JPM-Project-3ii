@@ -16,6 +16,11 @@ ma_export_*.csv
 llm_field_results*.jsonl
 llm_field_extractions*.csv
 
+# Secrets — API keys, credentials (NEVER commit; repo is public)
+.env
+.env.*
+*.key
+
 # Python virtual environment
 .venv/
 
@@ -28,3 +33,12 @@ cusip_manual_overrides.csv
 
 # Backfill run logs
 cusip_backfill*.log
+
+# SEC download run dirs (large, regenerable) + CRSP-derived intermediates — keep local
+ma_edgar_test/
+ma_edgar_run/
+ma_field_locator*/
+ma_ownership*/
+ma_market*/
+ma_model*/
+target_close_dates.csv

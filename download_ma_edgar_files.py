@@ -39,6 +39,7 @@ import argparse
 import datetime as dt
 import hashlib
 import html
+import itertools
 import json
 import os
 import random
@@ -49,7 +50,7 @@ import time
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import urljoin
+from urllib.parse import urljoin, quote
 
 import pandas as pd
 import requests
@@ -572,6 +573,75 @@ def fuzzy_match_company(name: str, cik_df: pd.DataFrame, min_score: int = 84) ->
     }
 
 
+SEC_EFTS_URL = "https://efts.sec.gov/LATEST/search-index"
+_EFTS_CACHE: Dict[str, Dict[str, Any]] = {}
+
+
+def resolve_cik_via_efts(client: SecClient, name: str, min_score: int = 84) -> Dict[str, Any]:
+    """Resolve a company name to a SEC CIK via EDGAR full-text search (efts).
+
+    company_tickers.json lists only CURRENT registrants, so it misses the ~96% of
+    merger targets that are delisted post-acquisition. efts indexes filing text back to
+    2001 (our universe is 2006+), so a delisted target's own proxies/8-Ks still resolve.
+    We collect the filer entities of filings matching the name and pick the entity whose
+    own name best matches the query (guards against ticker/name reuse and co-filers like
+    the acquirer or institutional 13G holders)."""
+    norm = normalize_name(name)
+    base = {"query_name": name, "query_norm": norm, "matched": False, "score": 0, "match_method": "efts"}
+    if not norm:
+        return base
+    if name in _EFTS_CACHE:
+        return dict(_EFTS_CACHE[name])
+    try:
+        # NOTE: use a plain request with only the UA — do NOT reuse client.session, which
+        # hardcodes Host: www.sec.gov and makes efts.sec.gov return a non-JSON error page.
+        ua = client.session.headers.get("User-Agent", "")
+        time.sleep(getattr(client, "sleep_seconds", 0.13))
+        r = requests.get(
+            SEC_EFTS_URL + '?q=%22' + quote(name) + '%22',
+            headers={"User-Agent": ua, "Accept-Encoding": "gzip, deflate"},
+            timeout=30,
+        )
+        r.raise_for_status()
+        hits = r.json().get("hits", {}).get("hits", [])
+    except Exception:
+        return base
+
+    cand: Dict[str, Dict[str, Any]] = {}
+    for h in hits:
+        for dn in h.get("_source", {}).get("display_names", []):
+            m = re.search(r"\(CIK (\d{10})\)", dn)
+            if not m:
+                continue
+            cik10 = m.group(1)
+            disp = dn.split("  (")[0].strip()
+            tm = re.search(r"\(([A-Z][A-Z0-9.\-]{0,6})\)\s*\(CIK", dn)
+            e = cand.setdefault(cik10, {"name": disp, "ticker": tm.group(1) if tm else "", "freq": 0})
+            e["freq"] += 1
+    if not cand:
+        _EFTS_CACHE[name] = base
+        return dict(base)
+
+    best_cik, best_score = None, -1.0
+    for cik10, e in cand.items():
+        cand_norm = normalize_name(e["name"])
+        if HAS_RAPIDFUZZ:
+            s = float(fuzz.token_set_ratio(norm, cand_norm))
+        else:
+            s = difflib.SequenceMatcher(None, norm, cand_norm).ratio() * 100.0
+        if s > best_score:
+            best_cik, best_score = cik10, s
+    e = cand[best_cik]
+    out = {
+        "query_name": name, "query_norm": norm,
+        "matched": bool(best_score >= min_score), "score": float(round(best_score, 1)),
+        "cik_int": int(best_cik), "cik10": best_cik,
+        "ticker": e["ticker"], "sec_title": e["name"], "match_method": "efts",
+    }
+    _EFTS_CACHE[name] = out
+    return dict(out)
+
+
 def flatten_submissions(sub: Dict[str, Any], client: SecClient) -> pd.DataFrame:
     """
     Convert SEC submissions JSON into a dataframe.
@@ -761,7 +831,13 @@ def score_field_text(
             # Multi-word exact economic terms get heavier weight.
             keyword_score += c * (4 if len(kw.split()) >= 2 else 1)
     form_bonus = preferred_form_score(form, document_name, list(spec.get("preferred_forms", [])))
-    field_score = keyword_score + (form_bonus if keyword_score > 0 else 0)
+    # Realized-results ("post_election_label") fields live in announcement forms (8-K/
+    # EX-99/425) that present results as numeric tables with SPARSE keyword matches — a
+    # keyword-dense S-4 that merely *describes* the election mechanics would otherwise
+    # out-score the actual results 8-K. For these fields, let the form/announcement bonus
+    # carry a candidate even with zero keyword hits so the results filing surfaces.
+    is_label = str(spec.get("timing_bucket", "")) == "post_election_label"
+    field_score = keyword_score + (form_bonus if (keyword_score > 0 or is_label) else 0)
     snippet = make_snippets(text, hits or keywords, max_snips=4, window=380)
     return field_score, hits, counts, snippet, form_bonus
 
@@ -781,6 +857,12 @@ def field_locator_rows_for_doc(
             spec=spec,
         )
         if field_score < min_field_score:
+            continue
+        # Realized-results fields must come from post-close announcement forms, never a
+        # pre-close registration/proxy (S-4, 424B*, DEF 14A). Those score form_bonus==0
+        # against the label fields' preferred forms (8-K/8-K-A/425/EX-99), so gate on it —
+        # this removes the logically-impossible "2018 S-4 as evidence for 2019 results" case.
+        if str(spec.get("timing_bucket", "")) == "post_election_label" and form_bonus == 0:
             continue
         rows.append(FieldLocatorRow(
             event_id=manifest_row.event_id,
@@ -815,16 +897,112 @@ def field_locator_rows_for_doc(
     return rows
 
 
-def trim_field_locator(locator_df: pd.DataFrame, top_k: int) -> pd.DataFrame:
+def estimate_close_date(manifest_rows: List["ManifestRow"]) -> Optional[pd.Timestamp]:
+    """Infer the deal's close date ≈ the TARGET company's last SEC filing.
+
+    The input CSV has no close date, but a merger target deregisters (Form 15) and goes
+    dark within days of closing, so the latest target-side filing is a reliable close
+    proxy — computed purely from filings we already downloaded, no extra data. Used to
+    anchor realized-results evidence selection (the results 8-K is filed at close, so it
+    beats both unrelated later 8-Ks and the keyword-heavy pre-close proxies)."""
+    dts = [
+        pd.to_datetime(getattr(r, "filing_date", None), errors="coerce")
+        for r in manifest_rows
+        if str(getattr(r, "side", "")).lower() == "target"
+    ]
+    dts = [d for d in dts if pd.notna(d)]
+    return max(dts) if dts else None
+
+
+def _cusip8(v: Any) -> str:
+    return re.sub(r"[^0-9A-Za-z]", "", str(v or "")).upper()[:8]
+
+
+def load_close_dates(path: Optional[str]) -> Dict[str, pd.Timestamp]:
+    """Load authoritative deal-close dates (CRSP delisting) keyed by 8-char target CUSIP.
+
+    Produced by build_close_dates.py from the target CUSIP + CRSP stocknames nameenddt.
+    This is the reliable close anchor; estimate_close_date() is the fallback when a
+    target has no CRSP coverage (foreign CINS / OTC)."""
+    if not path or not Path(path).exists():
+        return {}
+    df = pd.read_csv(path, dtype=str, keep_default_na=False)
+    out: Dict[str, pd.Timestamp] = {}
+    for _, r in df.iterrows():
+        c8 = _cusip8(r.get("target_cusip8") or r.get("target_cusip"))
+        d = pd.to_datetime(r.get("close_date", ""), errors="coerce")
+        if c8 and pd.notna(d):
+            out[c8] = d
+    return out
+
+
+def _close_proximity_bonus(days_from_close: Optional[float]) -> int:
+    """Boost for a realized-results filing near the inferred close date."""
+    if days_from_close is None:
+        return 0
+    d = abs(days_from_close)
+    if d <= 45:
+        return 25
+    if d <= 120:
+        return 10
+    if d <= 270:
+        return 3
+    return 0
+
+
+def trim_field_locator(
+    locator_df: pd.DataFrame,
+    top_k: int,
+    close_est_by_event: Optional[Dict[str, pd.Timestamp]] = None,
+) -> pd.DataFrame:
     if locator_df.empty or top_k <= 0:
         return locator_df
-    out = (
-        locator_df.sort_values(["event_id", "field_name", "field_score", "filing_date"], ascending=[True, True, False, True])
-        .groupby(["event_id", "field_name"], dropna=False)
-        .head(top_k)
-        .reset_index(drop=True)
+    df = locator_df.copy()
+    df["_fdate"] = pd.to_datetime(df["filing_date"], errors="coerce")
+    is_label = df["timing_bucket"].astype(str) == "post_election_label"
+
+    # Timing gate (needs a reliable close date): a realized-results field cannot be
+    # satisfied by a filing made well BEFORE close — the results don't exist yet. This
+    # drops the deal-ANNOUNCEMENT 8-K/425 (right form, describes the election mechanics,
+    # high keyword score, but filed months pre-close) which otherwise out-scores the terse
+    # results 8-K. Only gate when we actually know close (CRSP); otherwise leave as-is.
+    if close_est_by_event:
+        PRE_CLOSE_BUFFER = 30  # results are announced around close; allow a small lead
+        drop = pd.Series(False, index=df.index)
+        for i in df.index[is_label]:
+            ce = close_est_by_event.get(str(df.at[i, "event_id"]))
+            fd = df.at[i, "_fdate"]
+            if ce is not None and pd.notna(fd) and (ce - fd).days > PRE_CLOSE_BUFFER:
+                drop.at[i] = True
+        if drop.any():
+            df = df[~drop]
+            is_label = df["timing_bucket"].astype(str) == "post_election_label"
+
+    # Close-date anchor: for realized-results fields, add a proximity-to-close bonus so the
+    # results announcement (filed at close) outranks unrelated later 8-Ks (earnings) and
+    # keyword-heavy pre-close proxies. Keyword score stays primary; proximity is the booster.
+    prox = pd.Series(0, index=df.index, dtype=int)
+    if close_est_by_event:
+        for i in df.index[is_label]:
+            ce = close_est_by_event.get(str(df.at[i, "event_id"]))
+            fd = df.at[i, "_fdate"]
+            if ce is not None and pd.notna(fd):
+                prox.at[i] = _close_proximity_bonus((fd - ce).days)
+    df["_eff"] = df["field_score"] + prox
+
+    parts = []
+    # Label fields: rank by (score + proximity), latest-first among ties.
+    lab = df[is_label].sort_values(
+        ["event_id", "field_name", "_eff", "_fdate"], ascending=[True, True, False, False]
     )
-    return out
+    # Pre-close term fields: rank by score, earliest authoritative filing among ties.
+    oth = df[~is_label].sort_values(
+        ["event_id", "field_name", "field_score", "_fdate"], ascending=[True, True, False, True]
+    )
+    for sub in (lab, oth):
+        if not sub.empty:
+            parts.append(sub.groupby(["event_id", "field_name"], dropna=False).head(top_k))
+    return pd.concat(parts).drop(columns=["_fdate", "_eff"]).reset_index(drop=True)
 
 
 def build_event_field_coverage(
@@ -936,7 +1114,20 @@ def build_selected_upload_docs(locator_df: pd.DataFrame, max_docs_per_event: int
         .sort_values(["event_id", "total_field_score", "max_field_score"], ascending=[True, False, False])
     )
     if max_docs_per_event > 0:
-        grouped = grouped.groupby("event_id", dropna=False).head(max_docs_per_event).reset_index(drop=True)
+        # Reserve slots for realized-results evidence. Ranking purely by total_field_score
+        # lets the term-heavy proxy (S-4/424B matches ~all term fields) consume every slot
+        # and crowd out the sparse-keyword results 8-K — which serves only the 2-3 label
+        # fields. Guarantee the top few label-evidence docs survive, then fill by score.
+        reserve = min(3, max_docs_per_event)
+        grouped["_is_label"] = grouped["timing_buckets"].astype(str).str.contains("post_election_label", na=False)
+        parts = []
+        for _ev, g in grouped.groupby("event_id", dropna=False):
+            lab = g[g["_is_label"]].sort_values(["max_field_score", "total_field_score"], ascending=False).head(reserve)
+            rest = g[~g.index.isin(lab.index)]
+            keep = pd.concat([lab, rest]).head(max_docs_per_event)
+            # restore the total-score ordering for the surviving set
+            parts.append(keep.sort_values(["total_field_score", "max_field_score"], ascending=False))
+        grouped = pd.concat(parts).drop(columns=["_is_label"]).reset_index(drop=True)
     return grouped
 
 
@@ -1128,7 +1319,8 @@ def anthropic_messages_payload(llm_payload: Dict[str, Any], model: str, max_toke
     return {
         "model": model,
         "max_tokens": max_tokens,
-        "temperature": 0,
+        # NOTE: temperature is intentionally omitted — Opus 4.8 / Sonnet 5 reject
+        # sampling params (400). Extraction determinism is handled via prompting.
         "system": llm_payload["system_prompt"],
         "messages": [
             {
@@ -1428,7 +1620,13 @@ def process_event(
         fdf = filings.loc[mask].sort_values("filingDate").copy()
 
         if max_docs_per_event_side and len(fdf) > max_docs_per_event_side:
-            fdf = fdf.head(max_docs_per_event_side)
+            # STRATIFY, don't just take the earliest N. The deal proxy (terms) sits near
+            # the announcement (start of window) but the election-RESULTS 8-K sits at close
+            # (later in the window). Taking only the earliest N — when a target files
+            # heavily around announcement (e.g. VMware) — truncates before close and the
+            # results filing is never retrieved. Keep the earliest half AND the latest half.
+            half = max_docs_per_event_side // 2
+            fdf = pd.concat([fdf.head(half), fdf.tail(max_docs_per_event_side - half)]).drop_duplicates()
 
         for _, f in fdf.iterrows():
             form = str(f.get("form", ""))
@@ -1580,8 +1778,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--pre-days", type=int, default=60, help="Days before announcement to include.")
     p.add_argument("--post-days", type=int, default=730, help="Days after announcement to include.")
     p.add_argument("--min-name-score", type=int, default=84, help="Minimum fuzzy score for CIK matching.")
+    p.add_argument("--close-dates", default=None, help="Optional CSV (target_cusip8/target_cusip, close_date) of authoritative CRSP delisting/close dates; anchors realized-results evidence. Build with build_close_dates.py.")
     p.add_argument("--max-events", type=int, default=None, help="Limit events for testing.")
-    p.add_argument("--max-docs-per-event-side", type=int, default=40, help="Cap filings per event-side after filtering.")
+    p.add_argument("--max-docs-per-event-side", type=int, default=60, help="Cap filings per event-side after filtering (stratified: earliest + latest, so both the announcement proxy and the close-date results filing survive).")
     p.add_argument("--download-exhibits", action="store_true", help="Also download filing-folder text/html/pdf exhibits.")
     p.add_argument("--no-save-documents", action="store_true",
                    help="Fetch SEC documents for scoring/LLM payloads but do not save document files locally.")
@@ -1678,7 +1877,13 @@ def main() -> None:
         event_idx = int(event["orig_row_idx"])
         for side, col in [("target", "Target Name"), ("acquirer", "Acquirer Name")]:
             name = str(event.get(col, "")).strip()
-            m = fuzzy_match_company(name, cik_df, min_score=args.min_name_score)
+            # Primary: EDGAR full-text search (resolves delisted merger targets). Fall
+            # back to the current-registrant company_tickers.json only if efts misses.
+            m = resolve_cik_via_efts(client, name, min_score=args.min_name_score)
+            if not m.get("matched"):
+                m_ticker = fuzzy_match_company(name, cik_df, min_score=args.min_name_score)
+                if m_ticker.get("matched") or float(m_ticker.get("score", 0) or 0) > float(m.get("score", 0) or 0):
+                    m = m_ticker
             m.update({
                 "event_idx": event_idx,
                 "side": side,
@@ -1703,6 +1908,10 @@ def main() -> None:
     all_field_locator_rows: List[FieldLocatorRow] = []
     llm_payloads: List[Dict[str, Any]] = []
     llm_results: List[Dict[str, Any]] = []
+    close_dates8 = load_close_dates(args.close_dates)
+    if close_dates8:
+        print(f"[{now_utc()}] Loaded {len(close_dates8):,} CRSP close dates for the realized-results anchor")
+    all_close_by_event: Dict[str, pd.Timestamp] = {}
     save_documents = not args.no_save_documents
     collect_llm_documents = args.llm_stage in {"prepare", "send"}
     if args.llm_stage != "off":
@@ -1741,7 +1950,17 @@ def main() -> None:
             if collect_llm_documents and rows and result.field_locator_rows:
                 event_locator_df = pd.DataFrame([asdict(r) for r in result.field_locator_rows])
                 event_locator_df["field_score"] = pd.to_numeric(event_locator_df["field_score"], errors="coerce").fillna(0).astype(int)
-                event_locator_df = trim_field_locator(event_locator_df, top_k=args.field_locator_top_k)
+                event_close = None
+                if rows:
+                    eid = str(rows[0].event_id)
+                    # Authoritative CRSP close date keyed by target CUSIP; fall back to the
+                    # target's-last-filing estimate when the target has no CRSP coverage.
+                    ec = close_dates8.get(_cusip8(event.get("Target cusip"))) if close_dates8 else None
+                    if ec is None:
+                        ec = estimate_close_date(rows)
+                    event_close = {eid: ec}
+                    all_close_by_event[eid] = ec
+                event_locator_df = trim_field_locator(event_locator_df, top_k=args.field_locator_top_k, close_est_by_event=event_close)
                 event_selected_docs_df = build_selected_upload_docs(event_locator_df, max_docs_per_event=args.claude_package_max_docs_per_event)
                 event_payloads = build_claude_field_payloads(
                     event_locator_df,
@@ -1786,7 +2005,13 @@ def main() -> None:
     if all_field_locator_rows:
         field_locator_df = pd.DataFrame([asdict(r) for r in all_field_locator_rows])
         field_locator_df["field_score"] = pd.to_numeric(field_locator_df["field_score"], errors="coerce").fillna(0).astype(int)
-        field_locator_df = trim_field_locator(field_locator_df, top_k=args.field_locator_top_k)
+        # Reuse the per-event close dates already resolved during processing (CRSP where
+        # available, filing-based estimate otherwise); backfill any gaps from the manifest.
+        close_by_event: Dict[str, pd.Timestamp] = dict(all_close_by_event)
+        for _eid, _rs in itertools.groupby(sorted(all_manifest, key=lambda r: r.event_id), key=lambda r: r.event_id):
+            if str(_eid) not in close_by_event or close_by_event[str(_eid)] is None:
+                close_by_event[str(_eid)] = estimate_close_date(list(_rs))
+        field_locator_df = trim_field_locator(field_locator_df, top_k=args.field_locator_top_k, close_est_by_event=close_by_event)
         field_locator_path = out_dir / "field_locator.csv"
         field_locator_df.to_csv(field_locator_path, index=False)
         print(f"[{now_utc()}] Wrote field locator: {field_locator_path} ({len(field_locator_df):,} rows)")
