@@ -22,6 +22,7 @@ import pandas as pd
 
 from download_ownership_etf_data import clean_str, event_id_from_row, numeric_value
 from download_wrds_market_data import parse_exchange_ratio, parse_money
+from structural_election_model import run_structural_backtest, write_structural_summary
 
 
 SEC_TRADE_ENTRY_FIELDS = [
@@ -133,6 +134,7 @@ def wide_llm_terms(llm: pd.DataFrame) -> pd.DataFrame:
         target[f"{field}__basis"] = row.get("basis")
         target[f"{field}__confidence"] = row.get("confidence")
         target[f"{field}__source_doc_ids"] = row.get("source_doc_ids")
+        target[f"{field}__source_filing_dates"] = row.get("source_filing_dates")
         target[f"{field}__notes"] = row.get("notes")
     return pd.DataFrame(rows.values())
 
@@ -489,7 +491,24 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--passive-default-propensity", type=float, default=0.90)
     p.add_argument("--passive-unknown-favored-propensity", type=float, default=0.50)
     p.add_argument("--trading-cost-bps", type=float, default=10.0)
-    p.add_argument("--min-net-alpha", type=float, default=0.25)
+    p.add_argument("--min-net-alpha", type=float, default=0.0)
+    p.add_argument("--rolling-window-events", type=int, default=50,
+                   help="Number of prior labeled events used to fit p and q.")
+    p.add_argument("--min-fit-events", type=int, default=10,
+                   help="Minimum prior labeled events before fitting; otherwise defaults are used.")
+    p.add_argument("--p-grid-size", type=int, default=51,
+                   help="Grid size for irrational cash-election probability p.")
+    p.add_argument("--q-grid-size", type=int, default=51,
+                   help="Grid size for rational original ownership share q.")
+    p.add_argument("--default-irrational-cash-prob", type=float, default=0.5,
+                   help="Fallback p before enough rolling observations exist.")
+    p.add_argument("--default-rational-share", type=float, default=0.3,
+                   help="Fallback q before enough rolling observations exist.")
+    p.add_argument("--trade-notional", type=float, default=1_000_000.0,
+                   help="Dollar notional for our target long. Borrow cost is assumed zero.")
+    p.add_argument("--own-hedge-policy", choices=["dollar_neutral", "conversion_expected", "none"],
+                   default="dollar_neutral",
+                   help="How to size the acquirer short leg for realized P&L.")
     return p.parse_args()
 
 
@@ -510,16 +529,25 @@ def main() -> None:
             panel.loc[panel["event_id"] == row["event_id"], key] = value
 
     coverage = build_coverage(panel, args)
-    preds = build_predictions(panel, args)
+    heuristic_preds = build_predictions(panel, args)
+    preds, rolling_params, backtest_summary = run_structural_backtest(panel, args)
 
     panel.to_csv(out_dir / "model_input_panel.csv", index=False)
     coverage.to_csv(out_dir / "variable_coverage_report.csv", index=False)
+    heuristic_preds.to_csv(out_dir / "election_model_predictions_heuristic.csv", index=False)
     preds.to_csv(out_dir / "election_model_predictions.csv", index=False)
+    rolling_params.to_csv(out_dir / "rolling_parameter_estimates.csv", index=False)
+    preds.to_csv(out_dir / "election_backtest_trades.csv", index=False)
+    write_structural_summary(out_dir / "backtest_summary.json", backtest_summary)
     write_summary(out_dir, coverage, preds)
 
     print(f"[{now_utc()}] Wrote {out_dir / 'model_input_panel.csv'}")
     print(f"[{now_utc()}] Wrote {out_dir / 'variable_coverage_report.csv'}")
+    print(f"[{now_utc()}] Wrote {out_dir / 'election_model_predictions_heuristic.csv'}")
     print(f"[{now_utc()}] Wrote {out_dir / 'election_model_predictions.csv'}")
+    print(f"[{now_utc()}] Wrote {out_dir / 'rolling_parameter_estimates.csv'}")
+    print(f"[{now_utc()}] Wrote {out_dir / 'election_backtest_trades.csv'}")
+    print(f"[{now_utc()}] Wrote {out_dir / 'backtest_summary.json'}")
     print(f"[{now_utc()}] Wrote {out_dir / 'model_run_summary.json'}")
 
 

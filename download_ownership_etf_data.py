@@ -37,6 +37,14 @@ from urllib.parse import urlencode
 import pandas as pd
 import requests
 
+from event_csv_adapter import (
+    ACQUIRER_CUSIP_COL,
+    ACQUIRER_SYMBOL_COL,
+    TARGET_CUSIP_COL,
+    TARGET_SYMBOL_COL,
+    normalize_event_input,
+)
+
 
 FMP_BASE = "https://financialmodelingprep.com"
 
@@ -452,7 +460,7 @@ class EventSymbol:
 
 
 def load_events(args: argparse.Namespace) -> pd.DataFrame:
-    df = pd.read_csv(args.input)
+    df = normalize_event_input(pd.read_csv(args.input))
     if "orig_row_idx" not in df.columns:
         df = df.reset_index(drop=False).rename(columns={"index": "orig_row_idx"})
     if "Announce Date Parsed" not in df.columns and "Announce Date" in df.columns:
@@ -1173,17 +1181,17 @@ def parse_args() -> argparse.Namespace:
                    help="Minimum CIK-name match score accepted for automatic ticker mapping. Historical targets often need overrides.")
     p.add_argument("--symbol-overrides", default=None,
                    help="Optional CSV with event_idx,side,symbol,permno,cusip,note. Overrides SEC/current ticker mapping.")
-    p.add_argument("--target-symbol-col", default=None,
+    p.add_argument("--target-symbol-col", default=TARGET_SYMBOL_COL,
                    help="Optional input CSV column containing the historical target ticker.")
-    p.add_argument("--acquirer-symbol-col", default=None,
+    p.add_argument("--acquirer-symbol-col", default=ACQUIRER_SYMBOL_COL,
                    help="Optional input CSV column containing the acquirer ticker.")
     p.add_argument("--target-permno-col", default=None,
                    help="Optional input CSV column containing the historical target CRSP PERMNO.")
     p.add_argument("--acquirer-permno-col", default=None,
                    help="Optional input CSV column containing the acquirer CRSP PERMNO.")
-    p.add_argument("--target-cusip-col", default=None,
+    p.add_argument("--target-cusip-col", default=TARGET_CUSIP_COL,
                    help="Optional input CSV column containing the target CUSIP.")
-    p.add_argument("--acquirer-cusip-col", default=None,
+    p.add_argument("--acquirer-cusip-col", default=ACQUIRER_CUSIP_COL,
                    help="Optional input CSV column containing the acquirer CUSIP.")
     p.add_argument("--sides", nargs="*", default=["target"], choices=["target", "acquirer"],
                    help="Companies to fetch. For election demand, target is usually the relevant side.")

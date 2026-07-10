@@ -54,6 +54,8 @@ from urllib.parse import urljoin
 import pandas as pd
 import requests
 
+from event_csv_adapter import normalize_event_input
+
 try:
     from rapidfuzz import fuzz, process as rf_process  # type: ignore
     HAS_RAPIDFUZZ = True
@@ -1640,7 +1642,7 @@ def main() -> None:
     print(f"[{now_utc()}] Loaded field specs: {len(field_specs):,}")
 
     print(f"[{now_utc()}] Loading input: {args.input}")
-    df = pd.read_csv(args.input)
+    df = normalize_event_input(pd.read_csv(args.input))
     required = ["Announce Date", "Target Name", "Acquirer Name", "Payment Type", "Deal Status"]
     missing = [c for c in required if c not in df.columns]
     if missing:

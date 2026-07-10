@@ -45,7 +45,7 @@ External model fields such as prices, borrow cost, borrow availability, 13F owne
 
 ```bash
 python download_ma_edgar_files.py \
-  --input ma_export_33248147_212700.csv \
+  --input /Users/wxy/Downloads/US_election_deals_for_analysis.csv \
   --output-dir ma_field_locator \
   --user-agent "Xiangyu Wang xiangyuwang@berkeley.edu" \
   --payment-types "Cash or Stock" "Cash and Stock" \
@@ -61,6 +61,14 @@ python download_ma_edgar_files.py \
 ```
 
 Important: use `--download-exhibits`. Election forms, letters of transmittal, notices of guaranteed delivery, merger agreements, and EX-99.1 proration releases often sit in exhibits.
+
+The current research CSV (`US_election_deals_for_analysis.csv`) is accepted directly.  The pipeline now adds canonical helper columns to `candidate_events.csv`:
+
+- `normalized_target_symbol`, `normalized_acquirer_symbol`
+- `normalized_target_cusip`, `normalized_acquirer_cusip`
+- `normalized_target_cusip_status`, `normalized_acquirer_cusip_status`
+
+WRDS ownership and market scripts use these normalized columns by default, so the cleaned ticker/CUSIP work in the source CSV is preserved without passing extra `--target-symbol-col` / `--target-cusip-col` arguments.
 
 ## Outputs
 
@@ -168,6 +176,13 @@ Market outputs:
 
 `--include-short-volume` uses the configured WRDS short-volume table as a proxy only. It is not a substitute for true short-interest positions or securities-lending/borrow data.
 
+For backtesting, `event_market_features.csv` also includes entry/exit close proxies:
+
+- `entry_rule_date`, `entry_target_price`, `entry_acquirer_price`
+- `exit_result_date`, `exit_target_price`, `exit_acquirer_price`
+
+Entry date is inferred from Claude source filing dates for pre-election mechanics. Exit date is inferred from final/realized proration result source dates. If those dates are missing, the script falls back and marks the fallback in `market_feature_notes`.
+
 ## Model panel and v1 strategy signal
 
 After SEC/Claude, ownership, and market runs finish, build the local model panel and coverage audit:
@@ -185,10 +200,19 @@ This writes:
 
 - `model_input_panel.csv` — one row per event with legal terms, ownership, and market features merged.
 - `variable_coverage_report.csv` — available/missing/not-applicable status for each modeling field.
-- `election_model_predictions.csv` — v1 proration/EV/hedge/signal output when the event has an actual election/proration structure.
+- `election_model_predictions.csv` — rolling fitted structural election-demand prediction and cap-aware trade/backtest rows.
+- `election_model_predictions_heuristic.csv` — archived v1 heuristic output for comparison.
+- `rolling_parameter_estimates.csv` — event-by-event fitted `p` and `q`.
+- `election_backtest_trades.csv` — one row per event with trade/no-trade decision, missed-arbitrage flag, loss flag, and P&L.
+- `backtest_summary.json` — trade count, missed arbitrage count, loss count, average P&L, and total P&L.
 - `model_run_summary.json` — compact run summary.
 
-The script is intentionally conservative. Fixed-consideration deals with no shareholder election are blocked as `fixed_consideration_no_shareholder_election`; missing caps, proration formulas, or default rules block the proration model instead of fabricating a signal.
+The default structural model assumes zero borrow cost, uses a 1,000,000 dollar target long notional, and sizes the acquirer short with `--own-hedge-policy dollar_neutral` unless overridden.  The fitted parameters are:
+
+- `p`: irrational investors' cash-election probability.
+- `q`: EV-sensitive rational investors' original target ownership share.
+
+The model rolls by prior labeled events, not by calendar time.  Realized labels come from Claude's `realized_cash_election_demand` / `realized_stock_election_demand` fields when available; missing labels are excluded from fitting.
 
 ## Week-3 EDA and p_active(spread) fitting
 

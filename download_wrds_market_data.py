@@ -42,6 +42,7 @@ from download_ownership_etf_data import (
     resolve_wrds_security_identifiers,
     to_date,
 )
+from event_csv_adapter import ACQUIRER_CUSIP_COL, ACQUIRER_SYMBOL_COL, TARGET_CUSIP_COL, TARGET_SYMBOL_COL
 
 
 SHORT_VOLUME_SHORT_COLS = [
@@ -95,6 +96,97 @@ def parse_exchange_ratio(value: Any) -> Optional[float]:
     return None
 
 
+TRADE_ENTRY_DATE_FIELDS = [
+    "consideration_menu",
+    "cash_consideration_per_share",
+    "stock_consideration_per_share",
+    "exchange_ratio",
+    "cash_cap",
+    "stock_cap",
+    "proration_formula",
+    "non_election_default_rule",
+    "election_deadline",
+]
+
+RESULT_DATE_FIELDS = [
+    "final_proration_results",
+    "realized_cash_election_demand",
+    "realized_stock_election_demand",
+    "preliminary_proration_results",
+    "deal_completion_or_break",
+]
+
+DATE_RE = re.compile(
+    r"(\b\d{4}-\d{1,2}-\d{1,2}\b|\b\d{1,2}/\d{1,2}/\d{2,4}\b|"
+    r"\b(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|"
+    r"Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|"
+    r"Dec(?:ember)?)\s+\d{1,2},\s+\d{4}\b)",
+    flags=re.I,
+)
+
+
+def json_list(value: Any) -> List[Any]:
+    text = clean_str(value)
+    if not text:
+        return []
+    try:
+        parsed = json.loads(text)
+    except Exception:
+        return [text]
+    if isinstance(parsed, list):
+        return parsed
+    return [parsed]
+
+
+def parse_first_date(value: Any) -> Optional[dt.date]:
+    text = clean_str(value)
+    if not text:
+        return None
+    candidates = DATE_RE.findall(text) or [text]
+    for candidate in candidates:
+        ts = pd.to_datetime(candidate, errors="coerce")
+        if ts is not None and not pd.isna(ts):
+            return pd.Timestamp(ts).date()
+    return None
+
+
+def terms_dates(terms: Dict[str, Any], fields: List[str]) -> List[dt.date]:
+    out: List[dt.date] = []
+    for field in fields:
+        for item in json_list(terms.get(f"{field}__source_filing_dates")):
+            d = parse_first_date(item)
+            if d is not None:
+                out.append(d)
+        d = parse_first_date(terms.get(field))
+        if d is not None:
+            out.append(d)
+    return sorted(set(out))
+
+
+def infer_entry_rule_date(terms: Dict[str, Any], announce_date: Any) -> Tuple[Optional[dt.date], str]:
+    dates = terms_dates(terms, TRADE_ENTRY_DATE_FIELDS)
+    deadline = parse_first_date(terms.get("election_deadline"))
+    if deadline is not None:
+        dates = [d for d in dates if d <= deadline]
+    if dates:
+        return max(dates), "llm_pre_election_source_filing_dates"
+    ann = to_date(announce_date)
+    if ann is not None:
+        return ann, "announce_date_fallback"
+    return None, "missing_entry_rule_date"
+
+
+def infer_exit_result_date(terms: Dict[str, Any], announce_date: Any) -> Tuple[Optional[dt.date], str]:
+    for field in RESULT_DATE_FIELDS:
+        dates = terms_dates(terms, [field])
+        if dates:
+            return min(dates), f"{field}_source_or_text_date"
+    ann = to_date(announce_date)
+    if ann is not None:
+        return ann, "announce_date_fallback_missing_result_date"
+    return None, "missing_exit_result_date"
+
+
 def load_llm_terms(path: Optional[str]) -> Dict[str, Dict[str, Any]]:
     if not path:
         return {}
@@ -106,7 +198,11 @@ def load_llm_terms(path: Optional[str]) -> Dict[str, Dict[str, Any]]:
             field_name = clean_str(row.get("field_name"))
             if not event_id or not field_name:
                 continue
-            out.setdefault(event_id, {})[field_name] = row.get("value")
+            target = out.setdefault(event_id, {})
+            target[field_name] = row.get("value")
+            for meta_col in ["basis", "confidence", "source_doc_ids", "source_form_types", "source_filing_dates", "notes"]:
+                if meta_col in row.index:
+                    target[f"{field_name}__{meta_col}"] = row.get(meta_col)
     else:
         for _, row in df.iterrows():
             event_id = clean_str(row.get("event_id"))
@@ -382,11 +478,38 @@ def side_row(snapshot: pd.DataFrame, event_id: str, side: str) -> Optional[pd.Se
     return hit.iloc[0]
 
 
+def daily_price_on_or_before(
+    market_daily: Optional[pd.DataFrame],
+    event_id: str,
+    side: str,
+    as_of_date: Optional[dt.date],
+) -> Optional[pd.Series]:
+    if market_daily is None or market_daily.empty or as_of_date is None:
+        return None
+    needed = {"event_id", "side", "price_date", "price"}
+    if not needed.issubset(set(market_daily.columns)):
+        return None
+    hit = market_daily[
+        (market_daily["event_id"].astype(str) == str(event_id))
+        & (market_daily["side"].astype(str) == side)
+    ].copy()
+    if hit.empty:
+        return None
+    hit["price_date_dt"] = pd.to_datetime(hit["price_date"], errors="coerce").dt.date
+    hit = hit.dropna(subset=["price_date_dt"])
+    hit = hit[hit["price_date_dt"] <= as_of_date]
+    if hit.empty:
+        return None
+    hit = hit.sort_values("price_date_dt")
+    return hit.iloc[-1]
+
+
 def build_event_features(
     events: pd.DataFrame,
     market_snapshot: pd.DataFrame,
     short_snapshot: pd.DataFrame,
     llm_terms: Dict[str, Dict[str, Any]],
+    market_daily: Optional[pd.DataFrame] = None,
 ) -> pd.DataFrame:
     rows: List[Dict[str, Any]] = []
     for _, ev in events.iterrows():
@@ -407,6 +530,26 @@ def build_event_features(
         )
         target_price = numeric_value(target.get("price")) if target is not None else None
         acquirer_price = numeric_value(acquirer.get("price")) if acquirer is not None else None
+        entry_rule_date, entry_rule_date_source = infer_entry_rule_date(terms, ev.get("Announce Date", ""))
+        exit_result_date, exit_result_date_source = infer_exit_result_date(terms, ev.get("Announce Date", ""))
+        entry_target = daily_price_on_or_before(market_daily, event_id, "target", entry_rule_date)
+        if entry_target is None:
+            entry_target = target
+        entry_acquirer = daily_price_on_or_before(market_daily, event_id, "acquirer", entry_rule_date)
+        if entry_acquirer is None:
+            entry_acquirer = acquirer
+        exit_target = daily_price_on_or_before(market_daily, event_id, "target", exit_result_date)
+        if exit_target is None:
+            exit_target = target
+        exit_acquirer = daily_price_on_or_before(market_daily, event_id, "acquirer", exit_result_date)
+        if exit_acquirer is None:
+            exit_acquirer = acquirer
+        entry_target_price = numeric_value(entry_target.get("price")) if entry_target is not None else None
+        entry_acquirer_price = numeric_value(entry_acquirer.get("price")) if entry_acquirer is not None else None
+        exit_target_price = numeric_value(exit_target.get("price")) if exit_target is not None else None
+        exit_acquirer_price = numeric_value(exit_acquirer.get("price")) if exit_acquirer is not None else None
+        pricing_target_price = entry_target_price if entry_target_price is not None else target_price
+        pricing_acquirer_price = entry_acquirer_price if entry_acquirer_price is not None else acquirer_price
         fixed_stock_value = None
         cash_election_value = cash
         stock_election_value = None
@@ -414,8 +557,8 @@ def build_event_features(
         deal_value = None
         deal_spread = None
         deal_spread_pct = None
-        if exchange_ratio is not None and acquirer_price is not None:
-            fixed_stock_value = exchange_ratio * acquirer_price
+        if exchange_ratio is not None and pricing_acquirer_price is not None:
+            fixed_stock_value = exchange_ratio * pricing_acquirer_price
             stock_election_value = fixed_stock_value
         menu_values = [v for v in [cash_election_value, stock_election_value] if v is not None]
         if menu_values:
@@ -424,10 +567,10 @@ def build_event_features(
             deal_value = best_menu_value
         elif cash is not None or fixed_stock_value is not None:
             deal_value = (cash or 0.0) + (fixed_stock_value or 0.0)
-        if deal_value is not None and target_price is not None:
-            deal_spread = deal_value - target_price
-            if target_price:
-                deal_spread_pct = deal_spread / target_price
+        if deal_value is not None and pricing_target_price is not None:
+            deal_spread = deal_value - pricing_target_price
+            if pricing_target_price:
+                deal_spread_pct = deal_spread / pricing_target_price
 
         target_short = side_row(short_snapshot, event_id, "target") if not short_snapshot.empty else None
 
@@ -441,6 +584,18 @@ def build_event_features(
             "deal_status": ev.get("Deal Status", ""),
             "target_price": target_price,
             "target_price_date": target.get("price_date") if target is not None else "",
+            "entry_rule_date": entry_rule_date,
+            "entry_rule_date_source": entry_rule_date_source,
+            "entry_target_price": entry_target_price,
+            "entry_target_price_date": entry_target.get("price_date") if entry_target is not None else "",
+            "entry_acquirer_price": entry_acquirer_price,
+            "entry_acquirer_price_date": entry_acquirer.get("price_date") if entry_acquirer is not None else "",
+            "exit_result_date": exit_result_date,
+            "exit_result_date_source": exit_result_date_source,
+            "exit_target_price": exit_target_price,
+            "exit_target_price_date": exit_target.get("price_date") if exit_target is not None else "",
+            "exit_acquirer_price": exit_acquirer_price,
+            "exit_acquirer_price_date": exit_acquirer.get("price_date") if exit_acquirer is not None else "",
             "target_volume": target.get("volume") if target is not None else None,
             "target_dollar_volume": target.get("dollar_volume") if target is not None else None,
             "target_adv20": target.get("adv20") if target is not None else None,
@@ -469,10 +624,16 @@ def build_event_features(
             "short_volume_ratio_20d_avg": target_short.get("short_volume_ratio_20d_avg") if target_short is not None else None,
             "market_feature_notes": "",
         }
+        notes = []
+        if entry_rule_date_source.endswith("fallback"):
+            notes.append(f"entry_rule_date={entry_rule_date_source}")
+        if "fallback" in exit_result_date_source or "missing" in exit_result_date_source:
+            notes.append(f"exit_result_date={exit_result_date_source}")
         if is_election_menu:
-            row["market_feature_notes"] = "deal_spread uses best menu value before proration; model EV/spread is computed in build_election_strategy_model.py."
+            notes.append("deal_spread uses best menu value before proration; model EV/spread is computed in build_election_strategy_model.py.")
         if deal_value is None:
-            row["market_feature_notes"] = "simple_contract_value_not_computable_from supplied LLM terms; election/proration EV needs model terms."
+            notes.append("simple_contract_value_not_computable_from supplied LLM terms; election/proration EV needs model terms.")
+        row["market_feature_notes"] = " ".join(notes)
         rows.append(row)
     return pd.DataFrame(rows)
 
@@ -538,15 +699,15 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--cik-matches", default=None)
     p.add_argument("--min-cik-match-score", type=float, default=95.0)
     p.add_argument("--symbol-overrides", default=None)
-    p.add_argument("--target-symbol-col", default=None)
-    p.add_argument("--acquirer-symbol-col", default=None)
+    p.add_argument("--target-symbol-col", default=TARGET_SYMBOL_COL)
+    p.add_argument("--acquirer-symbol-col", default=ACQUIRER_SYMBOL_COL)
     p.add_argument("--target-permno-col", default=None)
     p.add_argument("--acquirer-permno-col", default=None)
-    p.add_argument("--target-cusip-col", default=None)
-    p.add_argument("--acquirer-cusip-col", default=None)
+    p.add_argument("--target-cusip-col", default=TARGET_CUSIP_COL)
+    p.add_argument("--acquirer-cusip-col", default=ACQUIRER_CUSIP_COL)
     p.add_argument("--sides", nargs="*", default=["target", "acquirer"], choices=["target", "acquirer"])
     p.add_argument("--pre-days", type=int, default=90)
-    p.add_argument("--post-days", type=int, default=30)
+    p.add_argument("--post-days", type=int, default=730)
     p.add_argument("--payment-types", nargs="*", default=["Cash or Stock", "Cash and Stock"])
     p.add_argument("--all-payment-types", action="store_true")
     p.add_argument("--deal-status", nargs="*", default=["Completed"])
@@ -660,7 +821,7 @@ def main() -> None:
         client.close()
 
     terms = load_llm_terms(args.llm_extractions)
-    features = build_event_features(events, snapshot, short_snapshot, terms)
+    features = build_event_features(events, snapshot, short_snapshot, terms, market_daily=daily)
     features.to_csv(out_dir / "event_market_features.csv", index=False)
     missing = build_missing_inventory(features, include_short_volume=args.include_short_volume)
     missing.to_csv(out_dir / "missing_market_data_inventory.csv", index=False)
