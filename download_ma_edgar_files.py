@@ -1987,6 +1987,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--cik-overrides", default="cik_manual_overrides.csv", help="Optional CSV (target_name, cik10, ...) of hand-verified CIKs for the recoverable resolver tail (delisted/renamed targets). Consulted before efts/company_tickers. Build/verify with build_cik_overrides.py.")
     p.add_argument("--close-dates", default=None, help="Optional CSV (target_cusip8/target_cusip, close_date) of authoritative CRSP delisting/close dates; anchors realized-results evidence. Build with build_close_dates.py.")
     p.add_argument("--max-events", type=int, default=None, help="Limit events for testing.")
+    p.add_argument("--start-event", type=int, default=0, help="Skip events whose orig_row_idx (the E###### number) is below this. Use on a --resume run to jump straight to remaining deals instead of re-scanning already-downloaded ones. Set it a few below the highest downloaded event to re-verify the boundary deal.")
     p.add_argument("--max-docs-per-event-side", type=int, default=60, help="Cap filings per event-side after filtering (stratified: earliest + latest, so both the announcement proxy and the close-date results filing survive).")
     p.add_argument("--download-exhibits", action="store_true", help="Also download filing-folder text/html/pdf exhibits.")
     p.add_argument("--no-save-documents", action="store_true",
@@ -2071,6 +2072,13 @@ def main() -> None:
 
     if args.max_events:
         udf = udf.head(args.max_events)
+
+    if args.start_event:
+        before = len(udf)
+        udf = udf[udf["orig_row_idx"].astype(int) >= int(args.start_event)]
+        print(f"[{now_utc()}] --start-event {args.start_event}: skipping {before - len(udf)} already-processed "
+              f"events; only events with orig_row_idx >= {args.start_event} are (re)processed. This makes a resume "
+              f"jump straight to remaining deals instead of re-scanning downloaded ones.")
 
     print(f"[{now_utc()}] Candidate events after filters: {len(udf):,}")
     out_dir.joinpath("candidate_events.csv").write_text(udf.to_csv(index=False), encoding="utf-8")
