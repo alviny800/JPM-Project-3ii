@@ -260,6 +260,9 @@ Rules:
 - Do not invent dates, ratios, caps, proration factors, deadlines, or default rules.
 - Distinguish pre-election trade-entry fields from post-election realized-label fields.
 - Prefer final prospectus/proxy/election-form documents for trade-entry mechanics. Prefer post-deadline 8-K/press release exhibits for realized proration labels.
+- Realized election-demand labels (realized_cash_election_demand, realized_stock_election_demand, preliminary_proration_results, final_proration_results) are frequently reported NOT as a clean percentage but as: (a) raw share counts electing each option, (b) an aggregate dollar amount of cash paid, or (c) a proration/allocation factor or an "oversubscribed"/"undersubscribed" statement. Capture whichever form is disclosed — do NOT leave the field null when the underlying counts, dollar amounts, or factor are present in the evidence.
+- When the evidence also supplies a base (shares outstanding, total shares electing, or shares deemed outstanding for the election), DERIVE the percentage from the raw counts, put the resulting % in value, show the arithmetic in notes, and set basis='derived'. If only the raw figure is available, report it with basis='direct'.
+- A "completion"/"effective time" 8-K that merely states the merger closed and restates the consideration mechanics is NOT a results filing. Look elsewhere in the supplied evidence for the election-results / proration press release before concluding a realized field is absent. Only if no election breakdown is disclosed anywhere in the evidence, set the realized-demand fields to null with basis='not_found' and note that results were not disclosed.
 """
 
 LLM_EXTRACTION_SCHEMA = {
@@ -576,6 +579,42 @@ def fuzzy_match_company(name: str, cik_df: pd.DataFrame, min_score: int = 84) ->
 SEC_EFTS_URL = "https://efts.sec.gov/LATEST/search-index"
 _EFTS_CACHE: Dict[str, Dict[str, Any]] = {}
 
+# Hand-verified name -> CIK map for the recoverable resolver tail (delisted micro-caps
+# and renamed targets that efts/company_tickers miss or match to the wrong entity).
+# Keyed by normalize_name(target_name). Populated by load_cik_overrides().
+_CIK_OVERRIDES: Dict[str, Dict[str, Any]] = {}
+
+
+def load_cik_overrides(path: Path) -> int:
+    """Load a hand-verified target-name -> CIK override table (see cik_manual_overrides.csv).
+
+    Each override is trusted absolutely (match_method='manual_override', score=100) and
+    consulted BEFORE efts/company_tickers, so a verified CIK can't be re-broken by fuzzy
+    matching. Returns the number of overrides loaded."""
+    if not path or not Path(path).exists():
+        return 0
+    df = pd.read_csv(path, dtype=str, keep_default_na=False)
+    for _, r in df.iterrows():
+        name = str(r.get("target_name", "")).strip()
+        cik10 = str(r.get("cik10", "")).strip()
+        if not name or not cik10:
+            continue
+        cik10 = cik10.zfill(10)
+        _CIK_OVERRIDES[normalize_name(name)] = {
+            "query_name": name, "query_norm": normalize_name(name),
+            "matched": True, "score": 100.0,
+            "cik_int": int(cik10), "cik10": cik10,
+            "ticker": "", "sec_title": str(r.get("resolved_name", "")),
+            "match_method": "manual_override",
+        }
+    return len(_CIK_OVERRIDES)
+
+
+def override_match(name: str) -> Optional[Dict[str, Any]]:
+    """Return a copy of the manual override for `name`, or None."""
+    hit = _CIK_OVERRIDES.get(normalize_name(name))
+    return dict(hit) if hit else None
+
 
 def resolve_cik_via_efts(client: SecClient, name: str, min_score: int = 84) -> Dict[str, Any]:
     """Resolve a company name to a SEC CIK via EDGAR full-text search (efts).
@@ -806,6 +845,21 @@ def preferred_form_score(form: str, document_name: str, preferred_forms: List[st
     return score
 
 
+# Strong "realized RESULTS" signal phrases — their presence means a document REPORTS
+# election outcomes (share counts / proration / oversubscription), as opposed to merely
+# describing the election mechanics ex-ante or announcing that the merger became effective.
+# Used to lift a genuine election-results press release above a bare "completion" 8-K when
+# both file at close and would otherwise tie on the form bonus alone (TFCF/NYSE/Andeavor).
+RESULTS_SIGNAL_PHRASES = [
+    "elected to receive cash", "elected to receive stock", "elected to receive the cash stock",
+    "shares elected", "were prorated", "was prorated", "prorated at", "proration factor",
+    "allocation factor", "oversubscribed", "undersubscribed", "election results",
+    "results of the election", "final proration", "preliminary proration",
+    "cash elections", "stock elections", "percent elected", "% elected",
+    "cash election shares", "stock election shares", "shares electing",
+]
+
+
 def score_field_text(
     text: str,
     form: str,
@@ -837,7 +891,18 @@ def score_field_text(
     # out-score the actual results 8-K. For these fields, let the form/announcement bonus
     # carry a candidate even with zero keyword hits so the results filing surfaces.
     is_label = str(spec.get("timing_bucket", "")) == "post_election_label"
-    field_score = keyword_score + (form_bonus if (keyword_score > 0 or is_label) else 0)
+    # Results-signal bonus: for realized-label fields, reward documents that actually REPORT
+    # outcomes so a results press release beats a same-day bare completion 8-K. Capped so it
+    # augments — never dominates — the keyword/form signal.
+    results_bonus = 0
+    if is_label:
+        sig = 0
+        for ph in RESULTS_SIGNAL_PHRASES:
+            parts = [re.escape(p) for p in ph.lower().replace("-", " ").split()]
+            if parts and re.search(r"[\s\-]+".join(parts), lowered):
+                sig += 1
+        results_bonus = min(sig, 5) * 6
+    field_score = keyword_score + (form_bonus if (keyword_score > 0 or is_label) else 0) + results_bonus
     snippet = make_snippets(text, hits or keywords, max_snips=4, window=380)
     return field_score, hits, counts, snippet, form_bonus
 
@@ -1370,6 +1435,147 @@ def call_anthropic(llm_payload: Dict[str, Any], api_key: str, model: str, max_to
     }
 
 
+# (input, output) USD per 1M tokens. The Message Batches API applies a further -50%.
+MODEL_PRICES_USD_PER_MTOK = {
+    "claude-opus-4-8": (5.0, 25.0),
+    "claude-opus-4-7": (5.0, 25.0),
+    "claude-opus-4-6": (5.0, 25.0),
+    "claude-sonnet-5": (2.0, 10.0),   # intro pricing through 2026-08-31
+    "claude-sonnet-4-6": (3.0, 15.0),
+    "claude-haiku-4-5": (1.0, 5.0),
+}
+
+
+def _parse_anthropic_message(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Extract the JSON object from a Messages API response body (same logic as call_anthropic)."""
+    text_blocks = [b.get("text", "") for b in data.get("content", []) if b.get("type") == "text"]
+    text = "\n".join(text_blocks).strip()
+    try:
+        return json.loads(text)
+    except Exception:
+        start, end = text.find("{"), text.rfind("}")
+        if start >= 0 and end > start:
+            try:
+                return json.loads(text[start:end + 1])
+            except Exception:
+                pass
+    return {"parse_error": True, "raw_text": text, "stop_reason": data.get("stop_reason", "")}
+
+
+def estimate_batch_cost(payloads: List[Dict[str, Any]], model: str, max_tokens: int) -> Tuple[float, int, int]:
+    """Rough pre-flight cost (USD, est_input_tok, est_output_tok) for a batch, incl. the -50% batch discount.
+    Output is planned at ~9k tok/deal (observed 8-11k); input from payload chars/4."""
+    pin, pout = MODEL_PRICES_USD_PER_MTOK.get(model, (5.0, 25.0))
+    tin = tout = 0.0
+    # SEC filing text tokenizes denser than prose: the 12-deal Sonnet-5 run measured
+    # ~256K real input tokens against ~792K payload chars/deal => ~3.05 chars/token. Use 3.0
+    # (a touch conservative) so this pre-flight never UNDER-estimates the cost cap.
+    for p in payloads:
+        body = json.dumps({k: v for k, v in p.items() if k != "system_prompt"}, ensure_ascii=False)
+        tin += (len(body) + len(str(p.get("system_prompt", "")))) / 3.0
+        tout += min(max_tokens, 9000)
+    cost = (tin * pin / 1e6 + tout * pout / 1e6) * 0.5
+    return cost, int(tin), int(tout)
+
+
+def run_anthropic_batch(
+    payloads: List[Dict[str, Any]],
+    api_key: str,
+    model: str,
+    max_tokens: int,
+    max_cost_usd: Optional[float] = None,
+    poll_seconds: int = 30,
+    max_wait_seconds: int = 86400,
+) -> List[Dict[str, Any]]:
+    """Submit all field payloads as ONE Message Batch (-50% vs sync), poll to completion, and
+    return records in the same shape call_anthropic produces so flatten_llm_records just works.
+
+    A hard cost cap (max_cost_usd) is enforced BEFORE submission: if the pre-flight estimate
+    exceeds it, we abort without spending — raise the cap or cut --max-events."""
+    if not api_key:
+        raise ValueError("Anthropic API key is required for --llm-stage batch.")
+    proj, est_in, est_out = estimate_batch_cost(payloads, model, max_tokens)
+    print(f"[batch] {len(payloads)} requests; est input ~{est_in:,} tok / output ~{est_out:,} tok; "
+          f"projected batch cost ~${proj:.2f}")
+    if max_cost_usd is not None and proj > max_cost_usd:
+        raise SystemExit(
+            f"[batch] ABORT (no spend): projected ${proj:.2f} exceeds --max-batch-cost-usd ${max_cost_usd:.2f}. "
+            f"Raise --max-batch-cost-usd or lower --max-events. Payloads are cached; re-running is free until submit."
+        )
+
+    headers = {"x-api-key": api_key, "anthropic-version": "2023-06-01", "content-type": "application/json"}
+    order: Dict[str, Dict[str, Any]] = {}
+    requests_body: List[Dict[str, Any]] = []
+    for i, p in enumerate(payloads):
+        cid = f"evt-{i:05d}"
+        order[cid] = p
+        requests_body.append({"custom_id": cid, "params": anthropic_messages_payload(p, model=model, max_tokens=max_tokens)})
+
+    def _post_with_retry(url: str, body: Dict[str, Any], tries: int = 5) -> Dict[str, Any]:
+        last = None
+        for attempt in range(tries):
+            try:
+                r = requests.post(url, headers=headers, data=json.dumps(body), timeout=120)
+                if r.status_code in (429, 500, 502, 503, 529):
+                    raise RuntimeError(f"HTTP {r.status_code}: {r.text[:200]}")
+                r.raise_for_status()
+                return r.json()
+            except Exception as e:
+                last = e
+                wait = min(60, (2 ** attempt)) + random.uniform(0, 1)
+                print(f"[batch] submit retry {attempt+1}/{tries} after error: {e}; sleeping {wait:.1f}s", file=sys.stderr)
+                time.sleep(wait)
+        raise RuntimeError(f"[batch] submit failed after {tries} tries: {last}")
+
+    created = _post_with_retry("https://api.anthropic.com/v1/messages/batches", {"requests": requests_body})
+    batch_id = created.get("id")
+    print(f"[batch] submitted batch {batch_id}; polling every {poll_seconds}s (up to {max_wait_seconds//3600}h)...")
+
+    waited = 0
+    results_url = None
+    while waited < max_wait_seconds:
+        try:
+            st = requests.get(f"https://api.anthropic.com/v1/messages/batches/{batch_id}", headers=headers, timeout=60).json()
+        except Exception as e:
+            print(f"[batch] poll error (will retry): {e}", file=sys.stderr)
+            time.sleep(poll_seconds); waited += poll_seconds; continue
+        status = st.get("processing_status")
+        counts = st.get("request_counts", {})
+        print(f"[batch] {now_utc()} status={status} counts={counts}")
+        if status == "ended":
+            results_url = st.get("results_url")
+            break
+        time.sleep(poll_seconds); waited += poll_seconds
+    if results_url is None:
+        raise RuntimeError(f"[batch] batch {batch_id} did not finish within {max_wait_seconds}s")
+
+    # Stream JSONL results; each line: {custom_id, result: {type, message?, error?}}
+    rr = requests.get(results_url, headers=headers, timeout=300)
+    rr.raise_for_status()
+    records: List[Dict[str, Any]] = []
+    n_ok = n_err = 0
+    for line in rr.text.splitlines():
+        if not line.strip():
+            continue
+        obj = json.loads(line)
+        cid = obj.get("custom_id", "")
+        payload = order.get(cid, {})
+        res = obj.get("result", {})
+        if res.get("type") == "succeeded":
+            data = res.get("message", {})
+            parsed = _parse_anthropic_message(data)
+            n_ok += 1
+        else:
+            data = {"batch_result_type": res.get("type"), "error": res.get("error")}
+            parsed = {"parse_error": True, "batch_error": res.get("error"), "result_type": res.get("type")}
+            n_err += 1
+        records.append({"provider": "anthropic", "model": model, "custom_id": cid,
+                        "request": {"event_id": payload.get("event", {}).get("event_id", "")},
+                        "response": data, "parsed": parsed})
+    print(f"[batch] collected {len(records)} results: {n_ok} succeeded, {n_err} errored")
+    return records
+
+
 def field_value(x: Any, *path: str) -> Any:
     cur = x
     for p in path:
@@ -1778,6 +1984,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--pre-days", type=int, default=60, help="Days before announcement to include.")
     p.add_argument("--post-days", type=int, default=730, help="Days after announcement to include.")
     p.add_argument("--min-name-score", type=int, default=84, help="Minimum fuzzy score for CIK matching.")
+    p.add_argument("--cik-overrides", default="cik_manual_overrides.csv", help="Optional CSV (target_name, cik10, ...) of hand-verified CIKs for the recoverable resolver tail (delisted/renamed targets). Consulted before efts/company_tickers. Build/verify with build_cik_overrides.py.")
     p.add_argument("--close-dates", default=None, help="Optional CSV (target_cusip8/target_cusip, close_date) of authoritative CRSP delisting/close dates; anchors realized-results evidence. Build with build_close_dates.py.")
     p.add_argument("--max-events", type=int, default=None, help="Limit events for testing.")
     p.add_argument("--max-docs-per-event-side", type=int, default=60, help="Cap filings per event-side after filtering (stratified: earliest + latest, so both the announcement proxy and the close-date results filing survive).")
@@ -1788,8 +1995,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--resume", action="store_true", default=True, help="Skip already downloaded files.")
     p.add_argument("--sleep-seconds", type=float, default=0.13, help="Delay between SEC requests. Keep >=0.11.")
     p.add_argument("--cache-dir", default=None, help="Optional JSON cache directory.")
-    p.add_argument("--llm-stage", choices=["off", "prepare", "send"], default="off",
-                   help="off: no LLM work; prepare: write per-event JSONL payloads only; send: call provider and aggregate responses.")
+    p.add_argument("--llm-stage", choices=["off", "prepare", "send", "batch"], default="off",
+                   help="off: no LLM work; prepare: write per-event JSONL payloads only; send: call provider synchronously per deal; batch: submit ALL deals as one Message Batch (half-price, async).")
+    p.add_argument("--max-batch-cost-usd", type=float, default=75.0,
+                   help="Hard pre-flight cost ceiling for --llm-stage batch. If the estimate exceeds this, abort BEFORE submitting (no spend).")
+    p.add_argument("--batch-poll-seconds", type=int, default=30, help="Polling interval while waiting for the Message Batch to finish.")
     p.add_argument("--llm-provider", choices=["anthropic"], default="anthropic",
                    help="LLM provider used when --llm-stage send.")
     p.add_argument("--llm-model", default="claude-sonnet-4-6", help="Claude/LLM model name.")
@@ -1868,6 +2078,9 @@ def main() -> None:
     client = SecClient(user_agent=args.user_agent, sleep_seconds=args.sleep_seconds, cache_dir=cache_dir)
     cik_df = load_company_tickers(client, out_dir / "_cache" / "company_tickers.json")
     print(f"[{now_utc()}] Loaded SEC company tickers: {len(cik_df):,}")
+    n_ovr = load_cik_overrides(Path(args.cik_overrides)) if args.cik_overrides else 0
+    if n_ovr:
+        print(f"[{now_utc()}] Loaded {n_ovr} hand-verified CIK overrides from {args.cik_overrides}")
 
     # Map names to CIK.
     match_rows: List[Dict[str, Any]] = []
@@ -1877,8 +2090,21 @@ def main() -> None:
         event_idx = int(event["orig_row_idx"])
         for side, col in [("target", "Target Name"), ("acquirer", "Acquirer Name")]:
             name = str(event.get(col, "")).strip()
-            # Primary: EDGAR full-text search (resolves delisted merger targets). Fall
-            # back to the current-registrant company_tickers.json only if efts misses.
+            # Hand-verified overrides win outright (recoverable delisted/renamed targets).
+            # Otherwise: EDGAR full-text search (resolves delisted merger targets), then
+            # fall back to the current-registrant company_tickers.json only if efts misses.
+            m = override_match(name)
+            if m is not None:
+                m.update({"side": side})
+                match_rows.append({**m,
+                                   "event_idx": event_idx, "side": side,
+                                   "target_name": str(event.get("Target Name", "")),
+                                   "acquirer_name": str(event.get("Acquirer Name", "")),
+                                   "announce_date": str(event.get("Announce Date", "")),
+                                   "payment_type": str(event.get("Payment Type", "")),
+                                   "deal_status": str(event.get("Deal Status", ""))})
+                cik_matches[f"{event_idx}:{side}"] = match_rows[-1]
+                continue
             m = resolve_cik_via_efts(client, name, min_score=args.min_name_score)
             if not m.get("matched"):
                 m_ticker = fuzzy_match_company(name, cik_df, min_score=args.min_name_score)
@@ -1913,7 +2139,7 @@ def main() -> None:
         print(f"[{now_utc()}] Loaded {len(close_dates8):,} CRSP close dates for the realized-results anchor")
     all_close_by_event: Dict[str, pd.Timestamp] = {}
     save_documents = not args.no_save_documents
-    collect_llm_documents = args.llm_stage in {"prepare", "send"}
+    collect_llm_documents = args.llm_stage in {"prepare", "send", "batch"}
     if args.llm_stage != "off":
         print(f"[{now_utc()}] LLM stage: {args.llm_stage}; save_documents={save_documents}")
 
@@ -2044,6 +2270,14 @@ def main() -> None:
         llm_payload_path = out_dir / "llm_field_payloads.jsonl"
         write_jsonl(llm_payload_path, llm_payloads)
         print(f"[{now_utc()}] Wrote LLM payloads: {llm_payload_path}")
+
+    # Batch stage: all payloads are built and downloads are done — submit ONE Message Batch.
+    if args.llm_stage == "batch" and llm_payloads:
+        api_key = args.anthropic_api_key or os.environ.get("ANTHROPIC_API_KEY", "")
+        llm_results = run_anthropic_batch(
+            llm_payloads, api_key=api_key, model=args.llm_model, max_tokens=args.llm_max_tokens,
+            max_cost_usd=args.max_batch_cost_usd, poll_seconds=args.batch_poll_seconds,
+        )
 
     if llm_results:
         llm_results_path = out_dir / "llm_field_results.jsonl"

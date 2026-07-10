@@ -121,7 +121,7 @@
     },
     "final_proration_results": {
       "required": true,
-      "description": "Final election results, realized proration factor, and realized fill-rate label after the deadline.",
+      "description": "Final election results, realized proration factor, and realized fill-rate label after the deadline. May be reported as share counts per option, a proration/allocation factor, or an oversubscribed/undersubscribed statement. Capture whichever is disclosed rather than requiring a clean percentage. A bare completion/effective-time 8-K restating the consideration mechanics is NOT the final results filing.",
       "timing_bucket": "post_election_label",
       "release_timing": "T4 after election deadline and near/after closing; never a trade-entry feature.",
       "document_keys": ["post-deadline 8-K", "EX-99.1 press release", "final proration announcement", "Form 425 communication"],
@@ -130,7 +130,7 @@
     },
     "realized_cash_election_demand": {
       "required": false,
-      "description": "Actual number or percentage of shares electing cash, if disclosed in final/proration result filings.",
+      "description": "Actual cash-election demand disclosed in results filings. May appear as a share count, an aggregate dollar amount, or a percentage. Capture whichever is disclosed; if a shares-outstanding or total-electing base is also present, derive the percentage (basis='derived'). Do not leave null when raw counts or dollar amounts are present.",
       "timing_bucket": "post_election_label",
       "release_timing": "T4 after election deadline and near/after closing.",
       "document_keys": ["post-deadline 8-K", "EX-99.1 press release", "final proration announcement"],
@@ -139,7 +139,7 @@
     },
     "realized_stock_election_demand": {
       "required": false,
-      "description": "Actual number or percentage of shares electing stock, if disclosed in final/proration result filings.",
+      "description": "Actual stock-election demand disclosed in results filings. May appear as a share count, an aggregate value, or a percentage. Capture whichever is disclosed; if a shares-outstanding or total-electing base is also present, derive the percentage (basis='derived'). Do not leave null when raw counts are present.",
       "timing_bucket": "post_election_label",
       "release_timing": "T4 after election deadline and near/after closing.",
       "document_keys": ["post-deadline 8-K", "EX-99.1 press release", "final proration announcement"],

@@ -25,6 +25,32 @@
   \titlepage
 \end{frame}
 
+\begin{frame}{Recap: Workflow Updates \& Current Tasks}
+\footnotesize
+\begin{columns}[T]
+\begin{column}{0.49\linewidth}
+\textbf{Workflow updates since last review}
+\begin{itemize}
+  \item Scaled from the single smoke-test deal to the \textbf{full US election universe}: 317 completed cash-or-stock deals, $\sim$283 reachable via SEC.
+  \item Rebuilt company$\rightarrow$CIK resolution for \textbf{delisted targets} using EDGAR full-text search plus hand-verified overrides (the prior ticker table missed $\sim$96\% of acquired targets).
+  \item Anchored results-filing selection on the authoritative \textbf{CRSP close date}; fixed a label-capture bug where the deal-announcement 8-K out-scored the actual results 8-K.
+  \item \textbf{Now capturing the realized election-demand label} --- previously ``not found'' --- by instructing Claude to derive it from share counts, aggregate cash, or the proration factor. $\sim$80\% capture on the validation sample; the remainder is a genuine issuer-disclosure gap.
+  \item Validated Claude (Sonnet 5) extraction quality (correct on known deals, no fabricated numbers) and added batch processing for $\sim$50\% lower cost to run the full universe economically.
+\end{itemize}
+\end{column}
+\begin{column}{0.49\linewidth}
+\textbf{Current tasks (in progress)}
+\begin{itemize}
+  \item Full SEC filing download running across the $\sim$283-deal universe (unattended, no API cost).
+  \item \textbf{Next:} batch Claude extraction of all deals under a fixed cost cap.
+  \item Join WRDS market data and ETF/passive ownership onto each extracted event (as validated in the smoke test).
+  \item Run EDA and fit the structural $p_{\text{active}}(\text{spread})$ model on the realized-demand labels.
+  \item Decide deliverable framing --- large-$N$ regression vs.\ structural framework plus case studies --- once the full-universe capture rate is measured.
+\end{itemize}
+\end{column}
+\end{columns}
+\end{frame}
+
 \begin{frame}{Weekly To-Do}
 \small
 \begin{columns}[T]
