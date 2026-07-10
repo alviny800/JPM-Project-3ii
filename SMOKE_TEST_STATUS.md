@@ -1,5 +1,7 @@
 # Smoke Test Status
 
+> **Status note (2026-07-10):** This is a historical snapshot of the June-26 single-deal smoke test. The pipeline has since scaled to the **full US election universe** (317 deals, ~283 SEC-reachable), switched extraction to `claude-sonnet-5` with **batch processing** (`--llm-stage batch`, ~50% cheaper, hard cost cap), added **EDGAR full-text CIK resolution** + hand-verified overrides and a **CRSP close-date anchor** for realized-results selection, and now **captures the realized election-demand label** (previously "not found") by deriving it from share counts, aggregate cash, or the proration factor. See `README.md` for the current run commands.
+
 Run date: 2026-06-26 America/Los_Angeles
 
 ## What ran
