@@ -56,3 +56,4 @@ ma_edgar_full/
 # Run logs (regenerable)
 ma_edgar_*.log
 *.log
+validation_results/
