@@ -2,7 +2,15 @@
 
 This project builds a field-driven SEC EDGAR retrieval pipeline for corporate-action election/proration merger research. It is not a generic document hoarder. The pipeline asks: for each transaction, where are the required fields, did we retrieve the filings/exhibits that contain them, and did we give Claude the right evidence to extract values?
 
-See `Field_File_Timeline_Guide.md` for the English field-file-timeline specification.
+See `Field_File_Timeline_Guide.md` for the English field-file-timeline specification, and
+**`ARB_FRAMEWORK.md` for the finalized Monte Carlo model and trade decision layer** that consumes
+these extractions.
+
+> **Pipeline status (2026-07):** the extraction and WRDS stages are complete (317 deals → 73 clean
+> election-demand labels, near the disclosure ceiling). The downstream modeling is the finalized
+> Monte Carlo prototype in `ARB_FRAMEWORK.md`: a calibrated demand distribution (KS p=0.96) →
+> proration mechanics → simulated payoff → a trade blotter (31 deals, 22 ENTER, signal skill
+> corr +0.67).
 
 ## Core files
 
@@ -11,16 +19,30 @@ See `Field_File_Timeline_Guide.md` for the English field-file-timeline specifica
 - `Field_File_Timeline_Guide.md` — English guide for project members and Claude prompt design.
 - `download_ownership_etf_data.py` — separate ownership/ETF helper; not a replacement for SEC filing extraction.
 - `download_wrds_market_data.py` — WRDS CRSP market/trading helper for target/acquirer prices, liquidity, shares, market cap, and deal-spread features.
-- `build_election_strategy_model.py` — local merge/audit/model script that combines SEC/Claude, WRDS ownership, and WRDS market outputs into model-ready rows and v1 strategy signals.
-- `election_arb_eda.py` — Week-3 exploratory data analysis and statistical tests. Merges the Claude extraction, WRDS ownership, and WRDS market outputs into a deal-level panel, then fits the empirical active-investor election function `p_active(spread)` with supporting plots and OLS/K-S tests.
-- `secapi_io_fulltext_ma_screen.py` — optional sec-api.io full-text helper.
+- `build_election_strategy_model.py` — colleague's local v1 merge/audit/strategy script. **Superseded for modeling by the `arb_*` Monte Carlo framework** (see `ARB_FRAMEWORK.md`); kept for reference.
+- `election_arb_eda.py` — exploratory data analysis and statistical tests. Merges the Claude extraction, WRDS ownership, and WRDS market outputs into a deal-level panel (`eda_output/merged_panel.csv`) used by the modeling layer.
+- `normalize_labels.py` — second-pass LLM normalization that separates election **demand** (`pct_elected_cash`) from post-proration **allocation**; writes `normalized_labels.csv` (73 clean demand labels).
+- `reextract_unresolved.py` — targeted re-extraction of specific deals with the sharpened prompt (batch or `--sync`); used to test and confirm the demand-disclosure ceiling.
+- `fix_acquirer_prices.py` — recovers missing acquirer prices caused by identifier drift (renames/delistings) by resolving PERMNO from the acquirer CUSIP; grew MC-ready deals 25 → 32.
 - `build_close_dates.py` — builds `target_close_dates.csv`, the authoritative CRSP delisting/close date per target, used to anchor realized-results (label) evidence selection.
+- `secapi_io_fulltext_ma_screen.py` — optional sec-api.io helper (**moved to `archive/alt_scripts/`**).
 - `audit_cik_resolution.py` — resolution-only audit ($0, EDGAR-only) of the name→CIK matcher across the deal universe; writes a score-sorted `cik_resolution_audit.csv` for review.
 - `build_cik_overrides.py` — finds and verifies correct CIKs for the recoverable resolver tail (delisted/renamed targets) by cross-checking each candidate's EDGAR filing history near the close date.
 - `cik_manual_overrides.csv` — hand-verified name→CIK overrides, consulted before EDGAR full-text search.
 - `backfill_cusips.py`, `add_clean_ticker_cols.py` — one-time identifier prep that produced the clean `Target/Acquirer cusip` and `Ticker Clean` columns in the analysis input; consumed by the WRDS ownership/market stages (SEC retrieval itself is name-based and ignores them).
 - `reference/` — canonical field/source map CSV, JSON, and Word document used to define which fields Claude should return and which source family each field belongs to.
-- `SMOKE_TEST_STATUS.md` — historical status of the Celgene/Bristol-Myers smoke tests (superseded by the full-universe run; see note in that file).
+
+### Monte Carlo model and trade layer (finalized prototype — see `ARB_FRAMEWORK.md`)
+
+- `arb_terms.py` — assembles one clean deal-terms table (`arb_deals.csv`) the model reads.
+- `arb_mc.py` — the engine: demand distribution (Beta) + proration mechanics + per-deal simulation.
+- `arb_backtest.py` — validation: leave-one-out demand calibration + realized-edge event study.
+- `arb_run.py` — driver: runs terms → model → backtest and writes `arb_output/` (figures + summary).
+- `arb_signal.py` — trade decision layer: entry, election side, hedge, sizing, go/no-go → `arb_signals.csv`.
+- `deadline_spread.py` — builds the deadline-date election spread and the fixed/floating split.
+- `build_walkthrough.py` — renders the browser walkthrough artifact (`arb_output/walkthrough.html`).
+
+Archived, non-core material lives in `archive/` (run logs, smoke tests, superseded intermediates).
 
 ## What the SEC script covers
 

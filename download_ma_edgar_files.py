@@ -262,6 +262,7 @@ Rules:
 - Prefer final prospectus/proxy/election-form documents for trade-entry mechanics. Prefer post-deadline 8-K/press release exhibits for realized proration labels.
 - Realized election-demand labels (realized_cash_election_demand, realized_stock_election_demand, preliminary_proration_results, final_proration_results) are frequently reported NOT as a clean percentage but as: (a) raw share counts electing each option, (b) an aggregate dollar amount of cash paid, or (c) a proration/allocation factor or an "oversubscribed"/"undersubscribed" statement. Capture whichever form is disclosed — do NOT leave the field null when the underlying counts, dollar amounts, or factor are present in the evidence.
 - When the evidence also supplies a base (shares outstanding, total shares electing, or shares deemed outstanding for the election), DERIVE the percentage from the raw counts, put the resulting % in value, show the arithmetic in notes, and set basis='derived'. If only the raw figure is available, report it with basis='direct'.
+- CRITICAL — election DEMAND vs. post-proration OUTCOME. `realized_cash_election_demand` / `realized_stock_election_demand` are the percentage of shares whose holders CHOSE / ELECTED that option at the deadline, BEFORE proration — this is DEMAND. Do NOT place a post-proration allocation there: the percentage of shares that RECEIVED, were CONVERTED to, or were ALLOCATED an option AFTER proration is a different quantity and belongs in `final_proration_results` (with the proration/fill factor). Cues: 'elected' / 'made a cash (stock) election' / 'shares electing' = demand; 'converted into' / 'received the consideration' / 'allocated after proration' = outcome. When a filing reports both (e.g. "~96% elected stock; after the 50/50 proration ~47.9% were converted to cash"), put 96% in `realized_stock_election_demand` and the 47.9% / proration factor in `final_proration_results` — never swap them, and never report the same number for both meanings.
 - A "completion"/"effective time" 8-K that merely states the merger closed and restates the consideration mechanics is NOT a results filing. Look elsewhere in the supplied evidence for the election-results / proration press release before concluding a realized field is absent. Only if no election breakdown is disclosed anywhere in the evidence, set the realized-demand fields to null with basis='not_found' and note that results were not disclosed.
 """
 
@@ -1988,6 +1989,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--close-dates", default=None, help="Optional CSV (target_cusip8/target_cusip, close_date) of authoritative CRSP delisting/close dates; anchors realized-results evidence. Build with build_close_dates.py.")
     p.add_argument("--max-events", type=int, default=None, help="Limit events for testing.")
     p.add_argument("--start-event", type=int, default=0, help="Skip events whose orig_row_idx (the E###### number) is below this. Use on a --resume run to jump straight to remaining deals instead of re-scanning already-downloaded ones. Set it a few below the highest downloaded event to re-verify the boundary deal.")
+    p.add_argument("--only-event-idx", default=None, help="Comma-separated orig_row_idx values (E###### numbers) to process EXCLUSIVELY. Reuses cached downloads for a targeted re-extraction of specific deals.")
     p.add_argument("--max-docs-per-event-side", type=int, default=60, help="Cap filings per event-side after filtering (stratified: earliest + latest, so both the announcement proxy and the close-date results filing survive).")
     p.add_argument("--download-exhibits", action="store_true", help="Also download filing-folder text/html/pdf exhibits.")
     p.add_argument("--no-save-documents", action="store_true",
@@ -2079,6 +2081,13 @@ def main() -> None:
         print(f"[{now_utc()}] --start-event {args.start_event}: skipping {before - len(udf)} already-processed "
               f"events; only events with orig_row_idx >= {args.start_event} are (re)processed. This makes a resume "
               f"jump straight to remaining deals instead of re-scanning downloaded ones.")
+
+    if args.only_event_idx:
+        ids = {int(x) for x in str(args.only_event_idx).split(",") if x.strip() != ""}
+        before = len(udf)
+        udf = udf[udf["orig_row_idx"].astype(int).isin(ids)]
+        print(f"[{now_utc()}] --only-event-idx: processing only {len(udf)}/{before} events "
+              f"(orig_row_idx in {sorted(ids)}); reuses cached downloads for a targeted re-extraction.")
 
     print(f"[{now_utc()}] Candidate events after filters: {len(udf):,}")
     out_dir.joinpath("candidate_events.csv").write_text(udf.to_csv(index=False), encoding="utf-8")

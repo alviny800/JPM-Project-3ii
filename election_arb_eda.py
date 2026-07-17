@@ -119,6 +119,25 @@ def coerce_numeric(s: pd.Series) -> pd.Series:
     return pd.to_numeric(extracted, errors="coerce")
 
 
+def coerce_percent(s: pd.Series) -> pd.Series:
+    """Extract the election PERCENTAGE from prose, on a 0-100 scale.
+
+    Claude returns strings like '108,054,170 shares elected cash, representing 40.85%
+    of the 264,507,424 outstanding' — the FIRST number is a share count, not the
+    percentage. coerce_numeric() would grab 108054170 and corrupt the label. Here we
+    prefer the value immediately before a '%'; fall back to a bare fraction in [0,1]
+    (expressed as percent); and NEVER return a raw share count."""
+    if s.dtype.kind in "iuf":
+        return s
+    txt = s.astype(str).str.replace(",", "", regex=False)
+    pct = pd.to_numeric(txt.str.extract(r"(\d+\.?\d*)\s*%", expand=False), errors="coerce")
+    frac = pd.to_numeric(txt.str.extract(r"(?<![\d.])(0?\.\d+)(?![\d%])", expand=False), errors="coerce")
+    frac = frac.where((frac >= 0) & (frac <= 1)) * 100.0
+    out = pct.fillna(frac)
+    # guard: a valid election/proration share is 0-100%; drop anything outside.
+    return out.where((out >= 0) & (out <= 100))
+
+
 def normalize_default_rule(s: pd.Series) -> pd.Series:
     """Returns 'cash', 'stock', 'mixed', or NaN."""
     t = s.astype(str).str.lower()
@@ -133,13 +152,24 @@ def load_and_merge(
     extractions_path: Path,
     ownership_path: Path,
     market_path: Path,
+    normalized_path: Path = None,
 ) -> pd.DataFrame:
-    """Load the three CSVs and merge into one deal-level DataFrame keyed by event_id."""
+    """Load the three CSVs and merge into one deal-level DataFrame keyed by event_id.
+    If normalized_path is given, its clean `pct_elected_cash` (election DEMAND, separated
+    from post-proration allocation by the normalization pass) is merged in and used as the
+    dependent variable in place of the crude regex-parsed field."""
     print(f"[load] extractions: {extractions_path}", file=sys.stderr)
     ext_long = pd.read_csv(extractions_path)
     ext = pivot_claude_long_to_wide(ext_long)
 
-    # Coerce numeric/categorical extracted fields
+    # Dollar/ratio terms: grab the first number. Percentage labels: grab the % (not the
+    # leading share count), so realized-demand/proration land on a sane 0-100 scale.
+    PCT_FIELDS = {
+        "realized_cash_election_demand",
+        "realized_stock_election_demand",
+        "final_proration_results",
+        "preliminary_proration_results",
+    }
     for col in [
         "cash_consideration_per_share",
         "stock_consideration_per_share",
@@ -152,7 +182,7 @@ def load_and_merge(
         "preliminary_proration_results",
     ]:
         if col in ext.columns:
-            ext[col + "_num"] = coerce_numeric(ext[col])
+            ext[col + "_num"] = coerce_percent(ext[col]) if col in PCT_FIELDS else coerce_numeric(ext[col])
 
     if "non_election_default_rule" in ext.columns:
         ext["default_rule"] = normalize_default_rule(ext["non_election_default_rule"])
@@ -167,7 +197,26 @@ def load_and_merge(
     if "event_id" in mkt.columns and mkt["event_id"].duplicated().any():
         mkt = mkt.sort_values("event_id").groupby("event_id", as_index=False).first()
 
-    df = ext.merge(own, on="event_id", how="left").merge(mkt, on="event_id", how="left")
+    # Drop columns from the right side that already exist in the accumulating frame
+    # (except the join key) so pandas doesn't suffix duplicates as _x/_y. This keeps the
+    # extraction's parsed term columns (cash_consideration_per_share_num, exchange_ratio_num)
+    # intact — the market CSV carries its own copies, which would otherwise shadow them.
+    def _nonoverlap(right: pd.DataFrame, have_cols) -> pd.DataFrame:
+        keep = [c for c in right.columns if c == "event_id" or c not in set(have_cols)]
+        return right[keep]
+
+    df = ext.copy()
+    df = df.merge(_nonoverlap(own, df.columns), on="event_id", how="left")
+    df = df.merge(_nonoverlap(mkt, df.columns), on="event_id", how="left")
+
+    if normalized_path is not None and Path(normalized_path).exists():
+        print(f"[load] normalized labels: {normalized_path}", file=sys.stderr)
+        norm = pd.read_csv(normalized_path)
+        keep = [c for c in ["event_id", "pct_elected_cash", "pct_elected_stock",
+                            "pct_received_cash", "cash_proration_factor", "disclosure_type"]
+                if c in norm.columns]
+        df = df.merge(_nonoverlap(norm[keep], df.columns), on="event_id", how="left")
+
     print(f"[load] merged: {len(df):,} events", file=sys.stderr)
     return df
 
@@ -180,9 +229,13 @@ def derive_modeling_columns(df: pd.DataFrame) -> pd.DataFrame:
     """Add the columns the EDA + tests need."""
     out = df.copy()
 
-    # Realized cash share — from realized_cash_election_demand if available.
-    # If reported as a percentage (>1), divide by 100. If as fraction, leave.
-    if "realized_cash_election_demand_num" in out.columns:
+    # Realized cash share = election DEMAND (% who ELECTED cash, pre-proration).
+    # Prefer the NORMALIZED pct_elected_cash (the clean, elected-vs-received-separated
+    # labels) when present — that's the defensible dependent variable. Only fall back to
+    # the crude regex-parsed field when no normalized labels were provided.
+    if "pct_elected_cash" in out.columns:
+        out["realized_cash_share"] = pd.to_numeric(out["pct_elected_cash"], errors="coerce") / 100.0
+    elif "realized_cash_election_demand_num" in out.columns:
         rced = out["realized_cash_election_demand_num"]
         out["realized_cash_share"] = np.where(rced > 1.0, rced / 100.0, rced)
     else:
@@ -306,7 +359,10 @@ def plot_election_by_default_rule(df: pd.DataFrame, out_dir: Path) -> None:
     if not groups:
         return
     fig, ax = plt.subplots(figsize=(7, 4))
-    ax.boxplot(groups, labels=labels)
+    try:
+        ax.boxplot(groups, tick_labels=labels)   # matplotlib >= 3.9
+    except TypeError:
+        ax.boxplot(groups, labels=labels)        # older matplotlib
     ax.set_ylabel("Realized cash share")
     ax.set_title("Realized cash election by default rule")
     _save(fig, out_dir / "plots" / "04_election_by_default_rule.png")
@@ -542,6 +598,8 @@ def parse_args() -> argparse.Namespace:
                    help="Path to ownership_mix_by_event.csv (WRDS ownership pipeline)")
     p.add_argument("--market", required=True, type=Path,
                    help="Path to event_market_features.csv (WRDS CRSP)")
+    p.add_argument("--normalized", default=None, type=Path,
+                   help="Optional normalized_labels.csv (clean pct_elected_cash demand); used as the dependent variable when present")
     p.add_argument("--output-dir", default=Path("eda_output"), type=Path,
                    help="Directory to write plots, tables, and summary")
     return p.parse_args()
@@ -551,7 +609,7 @@ def main() -> None:
     args = parse_args()
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
-    df = load_and_merge(args.extractions, args.ownership, args.market)
+    df = load_and_merge(args.extractions, args.ownership, args.market, args.normalized)
     df = derive_modeling_columns(df)
 
     panel_path = args.output_dir / "merged_panel.csv"

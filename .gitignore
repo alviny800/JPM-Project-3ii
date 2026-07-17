@@ -57,3 +57,17 @@ ma_edgar_full/
 ma_edgar_*.log
 *.log
 validation_results/
+
+# Local backups (deck / data)
+*_backup.pptx
+*_backup.csv
+
+# Archived / superseded material — kept local, out of the repo
+archive/
+
+# CRSP-price-derived model intermediates — keep local, do NOT commit (repo is public)
+arb_deals.csv
+deadline_spread.csv
+arb_signals.csv
+arb_realized_edge.csv
+eda_output/
