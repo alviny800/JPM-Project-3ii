@@ -17,6 +17,9 @@ Turns the Monte Carlo payoff model into an actionable trade per deal. For each d
 This is a forward-looking generator: point it at a live deal's terms+prices and it emits the
 trade. Run on our historical deals it also prints the REALIZED outcome next to each signal.
 
+The demand model is fit LEAVE-ONE-OUT per deal (a Beta that never saw the deal it prices), so
+the reported signal skill is fully out-of-sample with respect to the demand distribution.
+
 Caveats (flagged, not hidden): the deals priced here all closed (survivorship) — the deal-break
 term is a scenario overlay, not calibrated on this subset; a break-inclusive P&L backtest needs
 the terminated deals. Hedge assumes the expected stock fraction (residual hedging error ignored).
@@ -49,9 +52,10 @@ def build_signals():
     daily["price_date"] = pd.to_datetime(daily["price_date"], errors="coerce")
     daily["announce_date"] = pd.to_datetime(daily["announce_date"], errors="coerce")
 
-    model = DemandModel(arb["f_cash"].dropna().values)          # the single default demand model
+    # demand values keyed by event, so each deal can be priced LEAVE-ONE-OUT (a demand model
+    # that never saw the deal it is pricing -> the signal skill is fully out-of-sample)
+    fc_by_event = arb.dropna(subset=["f_cash"]).set_index("event_id")["f_cash"]
     rng = np.random.default_rng(11)
-    f = model.draw(NDRAW, rng=rng)                               # one shared demand sample
 
     rows = []
     for _, d in ready.iterrows():
@@ -67,6 +71,9 @@ def build_signals():
         Pacq = price_on(aq, ann + pd.Timedelta(days=ENTRY_LAG), "onafter")
         if not np.isfinite(M) or not np.isfinite(Pacq):
             continue
+        # fit the demand Beta on every deal EXCEPT this one, then sample -> out-of-sample pricing
+        loo = fc_by_event.drop(d.event_id, errors="ignore").values
+        f = DemandModel(loo).draw(NDRAW, rng=rng)
         stock_val = d.R * Pacq
         cash_h, stock_h, blended, _ = prorate(f, d.pi_cash, d.C, stock_val)
 
