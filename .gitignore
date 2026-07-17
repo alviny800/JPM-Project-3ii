@@ -59,7 +59,7 @@ ma_edgar_*.log
 validation_results/
 
 # Local backups (deck / data)
-*_backup.pptx
+*_backup*.pptx
 *_backup.csv
 
 # Archived / superseded material — kept local, out of the repo
