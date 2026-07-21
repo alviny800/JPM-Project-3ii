@@ -25,6 +25,8 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import pandas as pd
 
+from deal_outcome_model import normalize_outcome_label, outcome_probability_row
+
 
 EPS = 1e-12
 NEG_INF = -1e18
@@ -356,7 +358,14 @@ def event_terms(row: pd.Series) -> Dict[str, Any]:
         "acquirer_bid_ask_spread_pct": bounded_share(numeric_value(first_present(row, ["acquirer_bid_ask_spread_pct", "acquirer_spread_pct"]))),
         "short_volume_ratio": bounded_share(numeric_value(first_present(row, ["short_volume_ratio", "short_volume_ratio_20d_avg"]))),
         "deal_break_probability": bounded_share(numeric_value(first_present(row, ["deal_break_probability", "deal_break_prob", "p_break"]))),
+        "deal_completed_probability": bounded_share(numeric_value(first_present(row, ["deal_completed_probability", "p_completed"]))),
+        "deal_terminated_probability": bounded_share(numeric_value(first_present(row, ["deal_terminated_probability", "p_terminated"]))),
+        "deal_withdrawn_probability": bounded_share(numeric_value(first_present(row, ["deal_withdrawn_probability", "p_withdrawn"]))),
+        "deal_outcome_model_source": first_present(row, ["deal_outcome_model_source"]),
+        "actual_deal_outcome": normalize_outcome_label(row) or clean_str(first_present(row, ["actual_deal_outcome"])),
         "break_price": numeric_value(first_present(row, ["break_price", "standalone_target_price", "unaffected_target_price"])),
+        "terminated_break_price": numeric_value(first_present(row, ["terminated_break_price"])),
+        "withdrawn_break_price": numeric_value(first_present(row, ["withdrawn_break_price"])),
     }
 
 
@@ -566,30 +575,89 @@ def net_alpha_for_choice(
     }
 
 
-def deal_break_probability(row: pd.Series, terms: Dict[str, Any], args: argparse.Namespace) -> float:
-    event_prob = terms.get("deal_break_probability")
-    if event_prob is not None:
-        return bounded_prob(float(event_prob), 0.0) or 0.0
-    return bounded_prob(float(arg_value(args, "deal_break_prob", 0.0)), 0.0) or 0.0
+def deal_outcome_probabilities(row: pd.Series, terms: Dict[str, Any], args: argparse.Namespace) -> Dict[str, float]:
+    completed = terms.get("deal_completed_probability")
+    terminated = terms.get("deal_terminated_probability")
+    withdrawn = terms.get("deal_withdrawn_probability")
+
+    if completed is None and terminated is None and withdrawn is None:
+        p_break = terms.get("deal_break_probability")
+        if p_break is None:
+            p_break = float(arg_value(args, "deal_break_prob", 0.0))
+        p_break = bounded_prob(float(p_break), 0.0) or 0.0
+        withdrawn_share = bounded_prob(float(arg_value(args, "withdrawn_share_of_break_prob", 0.35)), 0.35) or 0.35
+        completed = 1.0 - p_break
+        withdrawn = p_break * withdrawn_share
+        terminated = p_break - withdrawn
+
+    probs = {
+        "completed": bounded_prob(completed, 0.0) or 0.0,
+        "terminated": bounded_prob(terminated, 0.0) or 0.0,
+        "withdrawn": bounded_prob(withdrawn, 0.0) or 0.0,
+    }
+    total = sum(probs.values())
+    if total <= EPS:
+        return {"completed": 1.0, "terminated": 0.0, "withdrawn": 0.0}
+    return {k: v / total for k, v in probs.items()}
 
 
 def break_alpha_for_choice(
     terms: Dict[str, Any],
     expected_stock_fraction: float,
     args: argparse.Namespace,
+    outcome: str = "terminated",
 ) -> Optional[float]:
     entry_target = terms.get("entry_target_price")
     entry_acq = terms.get("entry_acquirer_price")
     if entry_target is None or entry_acq is None:
         return None
-    break_price = terms.get("break_price")
+    if outcome == "withdrawn":
+        break_price = terms.get("withdrawn_break_price")
+        loss_pct = float(arg_value(args, "withdrawn_break_loss_pct", arg_value(args, "break_loss_pct", 0.30)))
+    else:
+        break_price = terms.get("terminated_break_price")
+        loss_pct = float(arg_value(args, "terminated_break_loss_pct", arg_value(args, "break_loss_pct", 0.30)))
     if break_price is None:
-        break_price = entry_target * (1.0 - float(arg_value(args, "break_loss_pct", 0.30)))
+        break_price = terms.get("break_price")
+    if break_price is None:
+        break_price = entry_target * (1.0 - loss_pct)
     acq_break_price = entry_acq * (1.0 + float(arg_value(args, "acquirer_break_return_pct", 0.0)))
     short_ratio = hedge_shares_per_target(terms, expected_stock_fraction, args)
     gross = (break_price - entry_target) + short_ratio * (entry_acq - acq_break_price)
     costs = net_alpha_for_choice(terms, gross, expected_stock_fraction, args)
     return costs["net_alpha_per_share"]
+
+
+def state_adjusted_net_alpha_for_choice(
+    row: pd.Series,
+    terms: Dict[str, Any],
+    close_net_alpha: Optional[float],
+    expected_stock_fraction: float,
+    args: argparse.Namespace,
+) -> Dict[str, Optional[float]]:
+    if close_net_alpha is None:
+        return {
+            "state_adjusted_net_alpha_per_share": None,
+            "deal_completed_probability": None,
+            "deal_terminated_probability": None,
+            "deal_withdrawn_probability": None,
+            "terminated_net_alpha_per_share": None,
+            "withdrawn_net_alpha_per_share": None,
+        }
+    probs = deal_outcome_probabilities(row, terms, args)
+    terminated_alpha = break_alpha_for_choice(terms, expected_stock_fraction, args, outcome="terminated")
+    withdrawn_alpha = break_alpha_for_choice(terms, expected_stock_fraction, args, outcome="withdrawn")
+    terminated_component = 0.0 if terminated_alpha is None else probs["terminated"] * terminated_alpha
+    withdrawn_component = 0.0 if withdrawn_alpha is None else probs["withdrawn"] * withdrawn_alpha
+    adjusted = probs["completed"] * close_net_alpha + terminated_component + withdrawn_component
+    return {
+        "state_adjusted_net_alpha_per_share": adjusted,
+        "deal_completed_probability": probs["completed"],
+        "deal_terminated_probability": probs["terminated"],
+        "deal_withdrawn_probability": probs["withdrawn"],
+        "terminated_net_alpha_per_share": terminated_alpha,
+        "withdrawn_net_alpha_per_share": withdrawn_alpha,
+    }
 
 
 def summarize_draws(values: List[float], prefix: str) -> Dict[str, Optional[float]]:
@@ -626,8 +694,9 @@ def simulate_choice_distribution(
     min_alpha = max(0.01, float(arg_value(args, "mc_min_beta_alpha", 0.25)))
     a = max(min_alpha, mean_cash * concentration)
     b = max(min_alpha, (1.0 - mean_cash) * concentration)
-    p_break = deal_break_probability(row, terms, args)
-    break_alpha = break_alpha_for_choice(terms, deterministic_expected_stock_fraction, args)
+    outcome_probs = deal_outcome_probabilities(row, terms, args)
+    terminated_alpha = break_alpha_for_choice(terms, deterministic_expected_stock_fraction, args, outcome="terminated")
+    withdrawn_alpha = break_alpha_for_choice(terms, deterministic_expected_stock_fraction, args, outcome="withdrawn")
 
     rng = random.Random(stable_seed(int(arg_value(args, "mc_seed", 1729)), row.get("event_id", ""), choice))
     net_alphas: List[float] = []
@@ -640,8 +709,12 @@ def simulate_choice_distribution(
     expected_stock_fractions: List[float] = []
 
     for _ in range(draws):
-        if p_break > 0.0 and break_alpha is not None and rng.random() < p_break:
-            net_alphas.append(float(break_alpha))
+        outcome_draw = rng.random()
+        if outcome_draw < outcome_probs["terminated"] and terminated_alpha is not None:
+            net_alphas.append(float(terminated_alpha))
+            continue
+        if outcome_draw < outcome_probs["terminated"] + outcome_probs["withdrawn"] and withdrawn_alpha is not None:
+            net_alphas.append(float(withdrawn_alpha))
             continue
 
         cash_sample = rng.betavariate(a, b)
@@ -670,8 +743,12 @@ def simulate_choice_distribution(
         "mc_effective_draws": len(net_alphas),
         "mc_cash_demand_mean_input": mean_cash,
         "mc_demand_concentration": concentration,
-        "mc_deal_break_probability": p_break,
-        "mc_break_net_alpha_per_share": break_alpha,
+        "mc_deal_completed_probability": outcome_probs["completed"],
+        "mc_deal_terminated_probability": outcome_probs["terminated"],
+        "mc_deal_withdrawn_probability": outcome_probs["withdrawn"],
+        "mc_deal_break_probability": outcome_probs["terminated"] + outcome_probs["withdrawn"],
+        "mc_terminated_net_alpha_per_share": terminated_alpha,
+        "mc_withdrawn_net_alpha_per_share": withdrawn_alpha,
         "mc_loss_probability": (
             sum(1 for v in net_alphas if v < 0.0) / len(net_alphas) if net_alphas else None
         ),
@@ -798,18 +875,38 @@ def realized_pnl(
     return gross_pnl - target_shares * per_share_cost
 
 
+def realized_break_pnl(
+    row: pd.Series,
+    terms: Dict[str, Any],
+    outcome: str,
+    expected_stock_fraction: float,
+    args: argparse.Namespace,
+) -> Optional[float]:
+    entry_target = terms.get("entry_target_price")
+    if entry_target is None or entry_target <= 0:
+        return None
+    alpha = break_alpha_for_choice(terms, expected_stock_fraction, args, outcome=outcome)
+    if alpha is None:
+        return None
+    target_shares = args.trade_notional / entry_target
+    return target_shares * alpha
+
+
 def choice_decision_value(choice_row: Dict[str, Any], args: argparse.Namespace) -> Optional[float]:
     metric = str(arg_value(args, "trade_decision_metric", "mean")).lower()
+    fallback = choice_row.get("state_adjusted_net_alpha_per_share")
+    if fallback is None:
+        fallback = choice_row.get("deterministic_net_alpha_per_share")
     if metric == "deterministic":
-        return choice_row.get("deterministic_net_alpha_per_share")
+        return fallback
     if metric == "p05":
         value = choice_row.get("mc_net_alpha_per_share_p05")
-        return value if value is not None else choice_row.get("deterministic_net_alpha_per_share")
+        return value if value is not None else fallback
     if metric == "cvar05":
         value = choice_row.get("mc_net_alpha_per_share_cvar05")
-        return value if value is not None else choice_row.get("deterministic_net_alpha_per_share")
+        return value if value is not None else fallback
     value = choice_row.get("mc_net_alpha_per_share_mean")
-    return value if value is not None else choice_row.get("deterministic_net_alpha_per_share")
+    return value if value is not None else fallback
 
 
 def choose_trade_and_backtest(row: pd.Series, pred: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any]:
@@ -833,6 +930,13 @@ def choose_trade_and_backtest(row: pd.Series, pred: Dict[str, Any], args: argpar
         cash_fraction, stock_fraction = receipt_mix(choice, fills["cash_fill_rate"], fills["stock_fill_rate"])
         expected_stock_fraction = stock_fraction or 0.0
         costs = net_alpha_for_choice(terms, gross_alpha, expected_stock_fraction, args)
+        state_adjusted = state_adjusted_net_alpha_for_choice(
+            row,
+            terms,
+            costs["net_alpha_per_share"],
+            expected_stock_fraction,
+            args,
+        )
         choices[choice] = {
             "cash_demand_with_own": cash_d,
             "stock_demand_with_own": stock_d,
@@ -848,6 +952,7 @@ def choose_trade_and_backtest(row: pd.Series, pred: Dict[str, Any], args: argpar
             "deterministic_borrow_cost_per_share": costs["borrow_cost_per_share"],
             "deterministic_total_cost_per_share": costs["total_cost_per_share"],
             "hedge_ratio_acquirer_short_per_target": costs["hedge_ratio_acquirer_short_per_target"],
+            **state_adjusted,
             "expected_cash_fraction": cash_fraction,
             "expected_stock_fraction": stock_fraction,
         }
@@ -892,19 +997,31 @@ def choose_trade_and_backtest(row: pd.Series, pred: Dict[str, Any], args: argpar
         signal = f"trade_{best_choice}_election"
         reason = "risk_adjusted_alpha_positive"
 
+    actual_deal_outcome = clean_str(terms.get("actual_deal_outcome")).lower()
+    outcome_label_available = actual_deal_outcome in {"completed", "terminated", "withdrawn"}
+    is_break_outcome = actual_deal_outcome in {"terminated", "withdrawn"}
     obs_cash, obs_stock, obs_source = observed_election_shares(row)
-    realized_label_available = bool(obs_source and obs_cash is not None and obs_stock is not None)
+    realized_election_label_available = bool(obs_source and obs_cash is not None and obs_stock is not None)
+    realized_label_available = bool(is_break_outcome or realized_election_label_available)
     actual_source = obs_source or "predicted_proxy_no_realized_label"
+    if is_break_outcome:
+        actual_source = f"deal_outcome_{actual_deal_outcome}_break_scenario"
     if obs_cash is None or obs_stock is None:
         obs_cash = pred["predicted_cash_demand_share"]
         obs_stock = pred["predicted_stock_demand_share"]
 
     pnl_by_choice: Dict[str, Dict[str, Any]] = {}
     for choice in ["cash", "stock"]:
-        cash_d, stock_d = demands_with_own_vote(obs_cash, obs_stock, own if signal.startswith("trade") else 0.0, choice)
-        fills = fill_rates(cash_d, stock_d, terms["cash_cap"], terms["stock_cap"], prefix="")
         expected_stock_fraction = choices[choice]["expected_stock_fraction"] or 0.0
-        pnl = realized_pnl(row, terms, choice, fills["cash_fill_rate"], fills["stock_fill_rate"], expected_stock_fraction, args)
+        if is_break_outcome:
+            cash_d = None
+            stock_d = None
+            fills = {"cash_fill_rate": None, "stock_fill_rate": None}
+            pnl = realized_break_pnl(row, terms, actual_deal_outcome, expected_stock_fraction, args)
+        else:
+            cash_d, stock_d = demands_with_own_vote(obs_cash, obs_stock, own if signal.startswith("trade") else 0.0, choice)
+            fills = fill_rates(cash_d, stock_d, terms["cash_cap"], terms["stock_cap"], prefix="")
+            pnl = realized_pnl(row, terms, choice, fills["cash_fill_rate"], fills["stock_fill_rate"], expected_stock_fraction, args)
         pnl_by_choice[choice] = {
             "actual_cash_demand_with_own": cash_d,
             "actual_stock_demand_with_own": stock_d,
@@ -946,6 +1063,9 @@ def choose_trade_and_backtest(row: pd.Series, pred: Dict[str, Any], args: argpar
         if best_decision_value is not None and terms["entry_target_price"]
         else None,
         "realized_label_available": realized_label_available,
+        "realized_election_label_available": realized_election_label_available,
+        "deal_outcome_label_available": outcome_label_available,
+        "actual_deal_outcome": actual_deal_outcome,
         "realized_label_quality_weight": label_quality_weight(obs_source),
         "realized_label_source": actual_source,
         "observed_cash_demand_share": obs_cash,
@@ -984,9 +1104,15 @@ def run_structural_backtest(panel: pd.DataFrame, args: argparse.Namespace) -> Tu
     parameter_rows: List[Dict[str, Any]] = []
     prediction_rows: List[Dict[str, Any]] = []
     historical_rows: List[pd.Series] = []
+    historical_outcome_rows: List[pd.Series] = []
 
     for i, row in ordered.iterrows():
         train_rows = historical_rows[-args.rolling_window_events:] if args.rolling_window_events > 0 else historical_rows
+        outcome_train_rows = (
+            historical_outcome_rows[-arg_value(args, "outcome_rolling_window_events", 250):]
+            if int(arg_value(args, "outcome_rolling_window_events", 250)) > 0
+            else historical_outcome_rows
+        )
         fit = fit_p_q(
             train_rows if len(train_rows) >= args.min_fit_events else [],
             args.p_grid_size,
@@ -995,12 +1121,24 @@ def run_structural_backtest(panel: pd.DataFrame, args: argparse.Namespace) -> Tu
             args.default_rational_share,
         )
         pred = predict_votes(row, fit["p_hat"], fit["q_hat"])
+        outcome = {}
+        if bool(arg_value(args, "enable_deal_outcome_model", True)):
+            outcome = outcome_probability_row(
+                row=row,
+                train_rows=outcome_train_rows,
+                min_fit_events=int(arg_value(args, "outcome_min_fit_events", 25)),
+                default_completed_prob=float(arg_value(args, "default_completed_prob", 0.90)),
+                default_terminated_prob=float(arg_value(args, "default_terminated_prob", 0.07)),
+                default_withdrawn_prob=float(arg_value(args, "default_withdrawn_prob", 0.03)),
+            )
+            pred.update(outcome)
         trade = choose_trade_and_backtest(row, pred, args)
         event_id = row.get("event_id", f"row_{i}")
         parameter_rows.append({
             "event_id": event_id,
             "rolling_event_index": i,
             **fit,
+            **outcome,
         })
         prediction_rows.append({
             "event_id": event_id,
@@ -1013,6 +1151,8 @@ def run_structural_backtest(panel: pd.DataFrame, args: argparse.Namespace) -> Tu
         obs_cash, _, _ = observed_election_shares(row)
         if obs_cash is not None:
             historical_rows.append(row)
+        if normalize_outcome_label(row) in {"completed", "terminated", "withdrawn"}:
+            historical_outcome_rows.append(row)
 
     predictions = pd.DataFrame(prediction_rows)
     parameters = pd.DataFrame(parameter_rows)
@@ -1045,6 +1185,7 @@ def run_structural_backtest(panel: pd.DataFrame, args: argparse.Namespace) -> Tu
         "hedge_policy": args.own_hedge_policy,
         "trade_decision_metric": str(arg_value(args, "trade_decision_metric", "mean")),
         "mc_draws": int(arg_value(args, "mc_draws", 0)),
+        "deal_outcome_model_enabled": bool(arg_value(args, "enable_deal_outcome_model", True)),
     }
     return predictions, parameters, summary
 

@@ -11,7 +11,8 @@ See `Field_File_Timeline_Guide.md` for the English field-file-timeline specifica
 - `Field_File_Timeline_Guide.md` — English guide for project members and Claude prompt design.
 - `download_ownership_etf_data.py` — separate ownership/ETF helper; not a replacement for SEC filing extraction.
 - `download_wrds_market_data.py` — WRDS CRSP market/trading helper for target/acquirer prices, liquidity, shares, market cap, and deal-spread features.
-- `build_election_strategy_model.py` — local merge/audit/model script that combines SEC/Claude, WRDS ownership, and WRDS market outputs into model-ready rows and v1 strategy signals.
+- `build_election_strategy_model.py` — local merge/audit/model script that combines SEC/Claude, WRDS ownership, and WRDS market outputs into model-ready rows and risk-aware strategy signals.
+- `deal_outcome_model.py` — independent pre-outcome classifier for completed, terminated, and withdrawn deals. Its probabilities enter only at the arbitrage decision layer.
 - `election_arb_eda.py` — Week-3 exploratory data analysis and statistical tests. Merges the Claude extraction, WRDS ownership, and WRDS market outputs into a deal-level panel, then fits the empirical active-investor election function `p_active(spread)` with supporting plots and OLS/K-S tests.
 - `secapi_io_fulltext_ma_screen.py` — optional sec-api.io full-text helper.
 - `reference/` — canonical field/source map CSV, JSON, and Word document used to define which fields Claude should return and which source family each field belongs to.
@@ -200,10 +201,10 @@ This writes:
 
 - `model_input_panel.csv` — one row per event with legal terms, ownership, and market features merged.
 - `variable_coverage_report.csv` — available/missing/not-applicable status for each modeling field.
-- `election_model_predictions.csv` — rolling fitted structural election-demand prediction, Monte Carlo proration risk metrics, and cap-aware trade/backtest rows.
+- `election_model_predictions.csv` — rolling fitted structural election-demand prediction, independent deal-outcome probabilities, Monte Carlo proration/break risk metrics, and cap-aware trade/backtest rows.
 - `election_model_predictions_heuristic.csv` — archived v1 heuristic output for comparison.
-- `rolling_parameter_estimates.csv` — event-by-event fitted `p` and `q`, using label-quality weights when realized labels are available.
-- `election_backtest_trades.csv` — one row per event with trade/no-trade decision, deterministic alpha, Monte Carlo net-alpha distribution, missed-arbitrage flag, loss flag, realized P&L, and proxy P&L.
+- `rolling_parameter_estimates.csv` — event-by-event fitted `p` and `q`, outcome fit counts/probabilities, and label-quality weights when realized election labels are available.
+- `election_backtest_trades.csv` — one row per event with trade/no-trade decision, completed/terminated/withdrawn probabilities, deterministic alpha, Monte Carlo net-alpha distribution, missed-arbitrage flag, loss flag, realized P&L, and proxy P&L.
 - `backtest_summary.json` — trade counts split into realized-label trades and proxy-only simulations, plus realized/proxy P&L summaries.
 - `model_run_summary.json` — compact run summary.
 
@@ -213,6 +214,19 @@ The default structural model assumes zero borrow cost, uses a 1,000,000 dollar t
 - `q`: EV-sensitive rational investors' original target ownership share.
 
 The model rolls by prior labeled events, not by calendar time.  Realized labels come from Claude's `realized_cash_election_demand` / `realized_stock_election_demand` fields when available; final/proration text can be used as a lower-weight backed-out label; missing labels are excluded from fitting and reported separately as proxy-only simulation P&L.
+
+Deal-outcome model:
+
+The outcome model is independent of election/proration estimation. It trains on prior deals labeled completed, terminated, or withdrawn from `deal_completion_or_break` / deal-status fields, then uses only pre-outcome legal, ownership, and market fields. Election demand and proration are still estimated conditional on a successful close. The trade layer then maps outcome probabilities into state-adjusted net alpha:
+
+```text
+state_adjusted_alpha =
+  p_completed * close_alpha
+  + p_terminated * terminated_break_alpha
+  + p_withdrawn * withdrawn_break_alpha
+```
+
+To train the outcome model from data, run the upstream SEC/WRDS/market jobs on an all-status universe, not only completed deals. For example, use `--all-status` or include completed, terminated, and withdrawn statuses in the source export. If the rolling sample is too small, the strategy falls back to the configured default probabilities.
 
 Useful risk controls:
 
@@ -228,10 +242,14 @@ python build_election_strategy_model.py \
   --min-p05-net-alpha -0.50 \
   --max-loss-probability 0.25 \
   --annual-borrow-cost-bps 50 \
-  --deal-break-prob 0.03
+  --default-completed-prob 0.90 \
+  --default-terminated-prob 0.07 \
+  --default-withdrawn-prob 0.03 \
+  --terminated-break-loss-pct 0.25 \
+  --withdrawn-break-loss-pct 0.35
 ```
 
-Monte Carlo output columns are prefixed by `cash_mc_` and `stock_mc_`, including net-alpha mean/p5/p50/p95/CVaR, fill-rate distributions, demand distributions, loss probability, and deal-break scenario contribution.
+Monte Carlo output columns are prefixed by `cash_mc_` and `stock_mc_`, including net-alpha mean/p5/p50/p95/CVaR, fill-rate distributions, demand distributions, loss probability, and completed/terminated/withdrawn scenario contributions.
 
 ## Week-3 EDA and p_active(spread) fitting
 

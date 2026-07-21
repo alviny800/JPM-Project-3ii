@@ -535,8 +535,27 @@ def parse_args() -> argparse.Namespace:
                    help="Minimum beta shape parameter used when predicted demand is near zero or one.")
     p.add_argument("--deal-break-prob", type=float, default=0.0,
                    help="Fallback deal-break probability if no event-level column is supplied.")
+    p.add_argument("--enable-deal-outcome-model", dest="enable_deal_outcome_model",
+                   action="store_true", default=True,
+                   help="Fit a rolling pre-outcome model for completed/terminated/withdrawn probabilities.")
+    p.add_argument("--disable-deal-outcome-model", dest="enable_deal_outcome_model",
+                   action="store_false",
+                   help="Disable rolling deal-outcome prediction and use event/default break probabilities only.")
+    p.add_argument("--outcome-rolling-window-events", type=int, default=250,
+                   help="Number of prior labeled deals used to fit the outcome model.")
+    p.add_argument("--outcome-min-fit-events", type=int, default=25,
+                   help="Minimum prior outcome-labeled deals before using the rolling outcome model.")
+    p.add_argument("--default-completed-prob", type=float, default=0.90)
+    p.add_argument("--default-terminated-prob", type=float, default=0.07)
+    p.add_argument("--default-withdrawn-prob", type=float, default=0.03)
+    p.add_argument("--withdrawn-share-of-break-prob", type=float, default=0.35,
+                   help="Fallback split of aggregate deal-break probability assigned to withdrawn.")
     p.add_argument("--break-loss-pct", type=float, default=0.30,
                    help="Fallback target loss if the deal breaks and no break-price column is supplied.")
+    p.add_argument("--terminated-break-loss-pct", type=float, default=0.25,
+                   help="Fallback target loss for mutually terminated deals.")
+    p.add_argument("--withdrawn-break-loss-pct", type=float, default=0.35,
+                   help="Fallback target loss for withdrawn deals.")
     p.add_argument("--acquirer-break-return-pct", type=float, default=0.0,
                    help="Fallback acquirer return in a deal-break scenario for the short hedge.")
     return p.parse_args()
