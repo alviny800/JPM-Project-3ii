@@ -19,9 +19,22 @@ Nothing here is stochastic — this is just the observed, cleaned deal terms.
 Reuses deadline_spread.csv (already has C, R, P_acq, spread, ratio_type, realized demand).
 """
 from __future__ import annotations
+from pathlib import Path
 import re
 import numpy as np
 import pandas as pd
+
+from arb_outcome import normalize_outcome_label
+
+
+def read_required_csv(path, purpose):
+    p = Path(path)
+    if not p.exists():
+        raise FileNotFoundError(
+            f"Missing {p} needed for {purpose}. Run the upstream pipeline that writes this file; "
+            "the arb layer will not fabricate missing inputs."
+        )
+    return pd.read_csv(p)
 
 
 def first_num(s, lo, hi):
@@ -47,11 +60,11 @@ def parse_pct_frac(s):
 
 
 def build_deals() -> pd.DataFrame:
-    ds = pd.read_csv("deadline_spread.csv")          # C, R, P_acq, spread, ratio_type, realized demand
-    ext = pd.read_csv("ma_edgar_full/llm_field_extractions.csv")
+    ds = read_required_csv("deadline_spread.csv", "deadline-date spread inputs")
+    ext = read_required_csv("ma_edgar_full/llm_field_extractions.csv", "SEC/Claude term extraction")
     w = ext[ext.event_id.notna()].pivot_table(index="event_id", columns="field_name",
                                                values="value", aggfunc="first")
-    norm = pd.read_csv("normalized_labels.csv")
+    norm = read_required_csv("normalized_labels.csv", "normalized realized election labels")
 
     d = ds.rename(columns={"cash_val": "C", "ratio": "R", "acq_price_deadline": "P_acq",
                            "spread_deadline": "spread", "realized_cash_share": "f_cash"}).copy()
@@ -75,15 +88,43 @@ def build_deals() -> pd.DataFrame:
     fc = norm.set_index("event_id")["pct_elected_cash"].apply(pd.to_numeric, errors="coerce") / 100.0
     d["f_cash"] = d["event_id"].map(fc)
 
-    # deal break flag (for survivorship-aware P&L backtest later)
+    # Outcome labels are post-outcome labels for backtest/audit only. If the
+    # extraction is absent or unrecognized, leave the label blank rather than
+    # implying the deal completed.
     brk = w["deal_completion_or_break"] if "deal_completion_or_break" in w.columns else pd.Series(dtype=str)
-    d["broke"] = d["event_id"].map(lambda e: bool(re.search(r"break|terminat|withdraw|fail",
-                                    str(brk.get(e, "")), re.I)) if e in getattr(brk, "index", []) else False)
+
+    def outcome_for(eid):
+        if eid not in getattr(brk, "index", []):
+            return "", "missing_deal_completion_or_break"
+        raw = brk.get(eid, "")
+        label = normalize_outcome_label(raw)
+        if label:
+            return label, "deal_completion_or_break"
+        if re.search(r"break|fail", str(raw), re.I):
+            return "", "deal_completion_or_break_regex_break_unclassified"
+        return "", "unrecognized_or_blank_deal_completion_or_break"
+
+    outcomes = d["event_id"].map(lambda e: outcome_for(e))
+    d["deal_outcome_label"] = outcomes.map(lambda t: t[0])
+    d["deal_outcome_source"] = outcomes.map(lambda t: t[1])
+    d["broke"] = (
+        d["deal_outcome_label"].isin(["terminated", "withdrawn"])
+        | d["deal_outcome_source"].eq("deal_completion_or_break_regex_break_unclassified")
+    )
 
     d["stock_val"] = d["R"] * d["P_acq"]
+    optional_probability_cols = [
+        c for c in [
+            "p_completed", "p_terminated", "p_withdrawn", "p_break",
+            "deal_completed_probability", "deal_terminated_probability",
+            "deal_withdrawn_probability", "deal_break_probability",
+        ]
+        if c in d.columns
+    ]
     # keep the analytic columns
     keep = ["event_id", "target_name", "ratio_type", "C", "R", "P_acq", "stock_val", "spread",
-            "pi_cash", "pi_cash_source", "f_cash", "broke"]
+            "pi_cash", "pi_cash_source", "f_cash", "deal_outcome_label", "deal_outcome_source",
+            "broke", *optional_probability_cols]
     d = d[keep]
     d.to_csv("arb_deals.csv", index=False)
 

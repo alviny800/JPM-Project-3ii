@@ -9,7 +9,7 @@ Figures:
   1 demand_distribution.png    empirical realized demand + fitted Beta (what the MC samples)
   2 calibration_pit.png        leave-one-out PIT histogram (is the model honest?)
   3 realized_edge.png          per-deal proration-capture edge (event study B)
-  4 portfolio_pnl.png          portfolio edge distribution, with a deal-break overlay
+  4 portfolio_pnl.png          portfolio edge distribution, with an outcome-risk overlay
 Summary: arb_output/summary.md  (numbers + interpretation, ready to walk through)
 """
 from __future__ import annotations
@@ -69,18 +69,29 @@ def main():
 
     # ---- portfolio MC + fig 4 ----
     NPATH = 20000
-    P_BREAK, BREAK_LOSS = 0.12, 0.25   # scenario: ~12% deal-break, revert 25% of blended
+    P_TERMINATED, P_WITHDRAWN = 0.07, 0.05
+    TERMINATED_LOSS, WITHDRAWN_LOSS = 0.25, 0.35
     per_deal_edge_pct = np.zeros((len(ready), NPATH))
     per_deal_real_pct = np.zeros((len(ready), NPATH))
     for i, (_, r) in enumerate(ready.iterrows()):
-        sim = simulate_deal(r, model, n=NPATH, p_break=P_BREAK, break_loss_frac=BREAK_LOSS, rng=RNG)
+        sim = simulate_deal(
+            r,
+            model,
+            n=NPATH,
+            p_terminated=P_TERMINATED,
+            p_withdrawn=P_WITHDRAWN,
+            terminated_loss_frac=TERMINATED_LOSS,
+            withdrawn_loss_frac=WITHDRAWN_LOSS,
+            rng=RNG,
+        )
         per_deal_edge_pct[i] = sim["edge"] / sim["blended"] * 100
         per_deal_real_pct[i] = (sim["realized"] - sim["blended"]) / sim["blended"] * 100
     port_edge = per_deal_edge_pct.mean(axis=0)          # equal-weight, no break
-    port_real = per_deal_real_pct.mean(axis=0)          # equal-weight, break overlay
+    port_real = per_deal_real_pct.mean(axis=0)          # equal-weight, three-state outcome overlay
     fig, ax = plt.subplots(figsize=(6, 4))
     ax.hist(port_edge, bins=40, alpha=.6, color="#4C78A8", label="proration edge (no break)")
-    ax.hist(port_real, bins=40, alpha=.6, color="#B07AA1", label=f"with {int(P_BREAK*100)}% deal-break")
+    ax.hist(port_real, bins=40, alpha=.6, color="#B07AA1",
+            label=f"with {int((P_TERMINATED + P_WITHDRAWN)*100)}% term/withdraw")
     ax.axvline(0, color="k", lw=1)
     ax.set(xlabel="portfolio return vs blended (%)", ylabel="MC paths",
            title=f"Portfolio P&L distribution ({len(ready)} deals, equal-weight)")
@@ -100,7 +111,23 @@ def main():
         "realized_edge_mean_pct": round(float(re.edge_pct.mean()), 2),
         "realized_edge_pct_positive": round(float((re.edge > 1e-6).mean()) * 100, 0),
         "portfolio_edge_mean_pct": round(float(port_edge.mean()), 2),
-        "portfolio_break_scenario": {"p_break": P_BREAK, "loss_frac": BREAK_LOSS},
+        "portfolio_break_scenario": {
+            "p_break": P_TERMINATED + P_WITHDRAWN,
+            "loss_frac": round(
+                (P_TERMINATED * TERMINATED_LOSS + P_WITHDRAWN * WITHDRAWN_LOSS)
+                / (P_TERMINATED + P_WITHDRAWN),
+                3,
+            ),
+            "source": "aggregate_view_of_three_state_scenario",
+        },
+        "portfolio_outcome_scenario": {
+            "p_completed": round(1.0 - P_TERMINATED - P_WITHDRAWN, 3),
+            "p_terminated": P_TERMINATED,
+            "p_withdrawn": P_WITHDRAWN,
+            "terminated_loss_frac": TERMINATED_LOSS,
+            "withdrawn_loss_frac": WITHDRAWN_LOSS,
+            "source": "fixed_scenario_no_event_probability_file",
+        },
         "portfolio_with_break_mean_pct": round(float(port_real.mean()), 2),
         "portfolio_with_break_p05_pct": round(float(np.percentile(port_real, 5)), 2),
     }
@@ -124,14 +151,14 @@ def main():
 ## 4. Portfolio Monte Carlo
 - Equal-weight {S['mc_ready_deals']} deals, {20000:,} paths.
 - Proration edge (no break): mean **{S['portfolio_edge_mean_pct']}%**.
-- With a **{int(S['portfolio_break_scenario']['p_break']*100)}% deal-break** scenario (revert {int(S['portfolio_break_scenario']['loss_frac']*100)}% of blended): mean **{S['portfolio_with_break_mean_pct']}%**, 5th-pct **{S['portfolio_with_break_p05_pct']}%** — the tail is deal-break risk, not election risk.
+- With a **{int((S['portfolio_outcome_scenario']['p_terminated'] + S['portfolio_outcome_scenario']['p_withdrawn'])*100)}% terminated/withdrawn** scenario (terminated loss {int(S['portfolio_outcome_scenario']['terminated_loss_frac']*100)}%, withdrawn loss {int(S['portfolio_outcome_scenario']['withdrawn_loss_frac']*100)}%): mean **{S['portfolio_with_break_mean_pct']}%**, 5th-pct **{S['portfolio_with_break_p05_pct']}%** — the tail is deal-outcome risk, not election risk.
 
 ## Spread conditioning
 - logit(demand) slope on deadline spread = **{S['spread_logit_slope']:+}** (se {S['spread_logit_slope_se']}) → ~flat on our data. Framework supports conditioning; the data says the tilt is weak, so we MC over that slope's uncertainty rather than assert it.
 
 ## Honest scope / next data
 - **Demand distribution: solid (n={S['demand_calibration_set']}).** Near the disclosure ceiling — no more recoverable from EDGAR (verified: 98% of no-label deals already had the 8-K pulled, the number just isn't disclosed).
-- **Full trade P&L** (vs entry price, survivorship-aware) needs one scoped WRDS pull: extend prices to each deal's close + add the terminated deals for deal-break risk. Figures 1–3 need nothing further.
+- **Full trade P&L** (vs entry price, survivorship-aware) needs one scoped WRDS pull: extend prices to each deal's close + add the all-status universe for completed/terminated/withdrawn outcome probabilities. Figures 1–3 need nothing further.
 """
     open(f"{OUT}/summary.md", "w").write(md)
     print("[run] wrote figures + summary to", OUT)

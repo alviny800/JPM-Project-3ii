@@ -17,6 +17,7 @@ capture more than the average. How much you capture depends on the demand draw �
 |---|---|---|
 | `arb_terms.py` | DATA LAYER — assemble clean deal terms (C, R, P_acq, pi_cash, realized f_cash) | `arb_deals.csv` |
 | `arb_mc.py` | ENGINE — demand model (Beta + spread-conditioning) + proration mechanics + per-deal MC | (importable) |
+| `arb_outcome.py` | OUTCOME ADAPTER — consume completed/terminated/withdrawn probabilities when supplied; otherwise mark scenario defaults | (importable) |
 | `arb_backtest.py` | VALIDATION — (A) leave-one-out calibration, (B) realized-edge event study | `arb_realized_edge.csv` |
 | `arb_run.py` | DRIVER — runs all, writes figures + summary | `arb_output/` |
 | `arb_signal.py` | TRADE LAYER — entry, election side, hedge, sizing, go/no-go rule | `arb_signals.csv` |
@@ -24,12 +25,22 @@ capture more than the average. How much you capture depends on the demand draw �
 
 Run everything: `.venv/bin/python3 arb_run.py && .venv/bin/python3 arb_signal.py`
 
+Optional outcome probabilities: `arb_signal.py --outcome-probs path/to/outcome_probs.csv`.
+That file must be event-level and include `event_id` plus either
+`p_completed/p_terminated/p_withdrawn` (aliases `deal_*_probability` also work) or an aggregate
+`p_break`. If no such file/columns are present, `arb_signals.csv` sets
+`outcome_probability_source=default_scenario_no_event_probabilities`; it does not pretend a
+terminated/withdrawn model has been trained.
+
 ## Results (current, n=73 demand / 32 MC-ready)
+These are the committed/current run artifacts. Rerun `arb_run.py` and `arb_signal.py` after the
+ignored local input CSVs are present to refresh them under the three-state outcome adapter.
+
 - **Demand model:** Beta(0.59, 0.78), mean 43% elect cash; U-shaped (election is near a corner decision).
 - **Calibration backtest ✅:** leave-one-out PIT mean 0.50, ~81% in the 80% band, **KS p=0.96** → the sampled distribution is honest out-of-sample.
 - **Realized edge:** 100% positive; median ~1.7% of blended (positive is partly guaranteed — the magnitude is the informative part).
 - **Trade blotter:** 31 deals, **22 ENTER**; **signal skill corr(E[return], realized) = +0.67** (predicted return tracks realized).
-- **Portfolio MC:** positive proration edge; a 12% deal-break scenario opens a downside tail (the tail is deal-break, not election, risk).
+- **Portfolio MC:** positive proration edge; a completed/terminated/withdrawn scenario opens a downside tail (the tail is deal-outcome, not election, risk).
 - **Spread conditioning:** logit slope ≈ 0 on our data — supported by the framework, MC'd over its uncertainty rather than asserted.
 
 ## Two structural ceilings (both now near their limits)
@@ -39,8 +50,11 @@ Run everything: `.venv/bin/python3 arb_run.py && .venv/bin/python3 arb_signal.py
 ## Honest scope / what's NOT done yet
 - **Demand distribution is solid and near the ceiling** — no more recoverable from EDGAR (98% of no-label deals already had the 8-K pulled; the number simply isn't disclosed).
 - **Full trade P&L vs entry price** (survivorship-aware) needs one scoped WRDS pull: extend daily
-  prices to each deal's close, and add the terminated deals for deal-break risk. Figures 1–3 and
-  the calibration result need nothing further.
+  prices to each deal's close, and add the all-status universe for completed/terminated/withdrawn
+  outcome probabilities. Figures 1–3 and the calibration result need nothing further.
+- **Terminated/withdrawn probability training is not in the committed artifacts yet.** The trade
+  layer is wired to consume those probabilities once supplied, but defaults are clearly labeled as
+  scenario assumptions.
 - `pi_cash` defaults to 0.50 on ~28% of deals where the cap wasn't parseable — flagged in
   `arb_deals.csv` via `pi_cash_source`.
 

@@ -36,13 +36,22 @@ these extractions.
 
 - `arb_terms.py` — assembles one clean deal-terms table (`arb_deals.csv`) the model reads.
 - `arb_mc.py` — the engine: demand distribution (Beta) + proration mechanics + per-deal simulation.
+- `arb_outcome.py` — completed/terminated/withdrawn probability adapter for the trade layer. It consumes event-level probabilities when supplied and labels scenario defaults when they are not.
 - `arb_backtest.py` — validation: leave-one-out demand calibration + realized-edge event study.
 - `arb_run.py` — driver: runs terms → model → backtest and writes `arb_output/` (figures + summary).
-- `arb_signal.py` — trade decision layer: entry, election side, hedge, sizing, go/no-go → `arb_signals.csv`.
+- `arb_signal.py` — risk-aware trade decision layer: entry, election side, hedge, completed/terminated/withdrawn overlay, p5/CVaR/loss gates, sizing, go/no-go → `arb_signals.csv`.
 - `deadline_spread.py` — builds the deadline-date election spread and the fixed/floating split.
 - `build_walkthrough.py` — renders the browser walkthrough artifact (`arb_output/walkthrough.html`).
 
 Archived, non-core material lives in `archive/` (run logs, smoke tests, superseded intermediates).
+
+`arb_signal.py` accepts `--outcome-probs path/to/outcome_probs.csv` when an independent
+completed/terminated/withdrawn model output is available. The CSV must include `event_id` plus
+`p_completed`, `p_terminated`, and `p_withdrawn` (or the `deal_*_probability` aliases). If those
+inputs are not present, the signal output explicitly marks
+`outcome_probability_source=default_scenario_no_event_probabilities` and uses the configured
+scenario defaults; it does not claim terminated/withdrawn probabilities were trained from the
+current committed files.
 
 ## What the SEC script covers
 
