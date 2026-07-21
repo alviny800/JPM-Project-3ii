@@ -71,3 +71,6 @@ deadline_spread.csv
 arb_signals.csv
 arb_realized_edge.csv
 eda_output/
+
+# PowerPoint/Office lock files
+~$*
