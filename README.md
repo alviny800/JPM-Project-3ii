@@ -183,7 +183,7 @@ For backtesting, `event_market_features.csv` also includes entry/exit close prox
 
 Entry date is inferred from Claude source filing dates for pre-election mechanics. Exit date is inferred from final/realized proration result source dates. If those dates are missing, the script falls back and marks the fallback in `market_feature_notes`.
 
-## Model panel and v1 strategy signal
+## Model panel and risk-aware strategy signal
 
 After SEC/Claude, ownership, and market runs finish, build the local model panel and coverage audit:
 
@@ -200,23 +200,42 @@ This writes:
 
 - `model_input_panel.csv` — one row per event with legal terms, ownership, and market features merged.
 - `variable_coverage_report.csv` — available/missing/not-applicable status for each modeling field.
-- `election_model_predictions.csv` — rolling fitted structural election-demand prediction and cap-aware trade/backtest rows.
+- `election_model_predictions.csv` — rolling fitted structural election-demand prediction, Monte Carlo proration risk metrics, and cap-aware trade/backtest rows.
 - `election_model_predictions_heuristic.csv` — archived v1 heuristic output for comparison.
-- `rolling_parameter_estimates.csv` — event-by-event fitted `p` and `q`.
-- `election_backtest_trades.csv` — one row per event with trade/no-trade decision, missed-arbitrage flag, loss flag, and P&L.
-- `backtest_summary.json` — trade count, missed arbitrage count, loss count, average P&L, and total P&L.
+- `rolling_parameter_estimates.csv` — event-by-event fitted `p` and `q`, using label-quality weights when realized labels are available.
+- `election_backtest_trades.csv` — one row per event with trade/no-trade decision, deterministic alpha, Monte Carlo net-alpha distribution, missed-arbitrage flag, loss flag, realized P&L, and proxy P&L.
+- `backtest_summary.json` — trade counts split into realized-label trades and proxy-only simulations, plus realized/proxy P&L summaries.
 - `model_run_summary.json` — compact run summary.
 
-The default structural model assumes zero borrow cost, uses a 1,000,000 dollar target long notional, and sizes the acquirer short with `--own-hedge-policy dollar_neutral` unless overridden.  The fitted parameters are:
+The default structural model assumes zero borrow cost, uses a 1,000,000 dollar target long notional, sizes the acquirer short with `--own-hedge-policy conversion_expected`, and runs 2,000 Monte Carlo demand draws per event/election choice.  The fitted parameters are:
 
 - `p`: irrational investors' cash-election probability.
 - `q`: EV-sensitive rational investors' original target ownership share.
 
-The model rolls by prior labeled events, not by calendar time.  Realized labels come from Claude's `realized_cash_election_demand` / `realized_stock_election_demand` fields when available; missing labels are excluded from fitting.
+The model rolls by prior labeled events, not by calendar time.  Realized labels come from Claude's `realized_cash_election_demand` / `realized_stock_election_demand` fields when available; final/proration text can be used as a lower-weight backed-out label; missing labels are excluded from fitting and reported separately as proxy-only simulation P&L.
+
+Useful risk controls:
+
+```bash
+python build_election_strategy_model.py \
+  --events ma_field_locator/candidate_events.csv \
+  --llm-extractions ma_field_locator_claude/llm_field_extractions.csv \
+  --ownership-mix ma_ownership_wrds/ownership_mix_by_event.csv \
+  --market-features ma_market_wrds/event_market_features.csv \
+  --output-dir ma_model_risk \
+  --trade-decision-metric cvar05 \
+  --min-net-alpha 0.25 \
+  --min-p05-net-alpha -0.50 \
+  --max-loss-probability 0.25 \
+  --annual-borrow-cost-bps 50 \
+  --deal-break-prob 0.03
+```
+
+Monte Carlo output columns are prefixed by `cash_mc_` and `stock_mc_`, including net-alpha mean/p5/p50/p95/CVaR, fill-rate distributions, demand distributions, loss probability, and deal-break scenario contribution.
 
 ## Week-3 EDA and p_active(spread) fitting
 
-`election_arb_eda.py` consumes the three pipeline outputs and produces the empirical analysis behind the structural model — the distribution of realized cash-election demand, its response to the deadline-date spread, and a fitted `p_active(spread)` function for the Monte Carlo.
+`election_arb_eda.py` consumes the three pipeline outputs and produces the empirical analysis behind the structural model — the distribution of realized cash-election demand, its response to the entry/deadline-date spread, and a bounded fitted `p_active(spread)` function for the Monte Carlo.
 
 ```bash
 python election_arb_eda.py \
@@ -228,12 +247,12 @@ python election_arb_eda.py \
 
 This writes:
 
-- `eda_output/merged_panel.csv` — deal-level panel joining legal terms, ownership, and market features, with derived columns (realized cash share, deadline spread, backed-out active-investor cash-election rate).
+- `eda_output/merged_panel.csv` — deal-level panel joining legal terms, ownership, and market features, with derived columns (realized cash share, label source/quality, entry/deadline spread, backed-out active-investor cash-election rate).
 - `eda_output/plots/*.png` — realized-cash-share histogram, spread-vs-active-election scatter (the key chart), demand-vs-cap, election-by-default-rule, passive-ownership interaction, and time-series plots.
-- `eda_output/tables/*.csv` — OLS coefficients, a K-S test that the default rule matters, and the fitted `active_election_function.csv` (`p_active(spread)`).
+- `eda_output/tables/*.csv` — OLS coefficients, a K-S test that the default rule matters, and the fitted bounded `active_election_function.csv` (`p_active(spread)`).
 - `eda_output/eda_summary.md` — narrative summary with the V1 modeling assumptions and caveats.
 
-The active-investor cash-election rate is backed out by treating lent/passive shares as taking the default rule, then attributing residual realized demand to the active population. It is fit as a simple linear `p_active(spread)` for V1; a logistic or piecewise form can replace it later. Post-election fields (`final_proration_results`, realized demand) are used only as calibration labels, never as trade-entry features.
+The active-investor cash-election rate is backed out by treating lent/passive shares as taking the default rule, then attributing residual realized demand to the active population. It is fit as a bounded logistic `p_active(spread)` by default, with the older linear probability coefficients preserved for diagnostics. Post-election fields (`final_proration_results`, realized demand) are used only as calibration labels, never as trade-entry features.
 
 ## Coverage gate
 

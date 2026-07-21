@@ -52,9 +52,10 @@ Requires: pandas, numpy, matplotlib, scipy
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 import matplotlib
 matplotlib.use("Agg")  # headless — write PNGs without a display
@@ -119,6 +120,133 @@ def coerce_numeric(s: pd.Series) -> pd.Series:
     return pd.to_numeric(extracted, errors="coerce")
 
 
+def first_number(value) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except Exception:
+        pass
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).replace(",", "")
+    match = re.search(r"-?\d+(?:\.\d+)?", text)
+    if not match:
+        return None
+    return float(match.group(0))
+
+
+def parse_fraction_value(value) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except Exception:
+        pass
+    if isinstance(value, (int, float)):
+        x = float(value)
+        if 0.0 <= x <= 1.0:
+            return x
+        if 1.0 < x <= 100.0:
+            return x / 100.0
+        return None
+    text = str(value).strip().lower().replace(",", "")
+    if not text or text in {"nan", "none", "null", "not_found", "not applicable", "n/a"}:
+        return None
+    pct = re.search(r"([0-9]+(?:\.[0-9]+)?)\s*%", text)
+    if pct:
+        return float(pct.group(1)) / 100.0
+    frac = re.search(r"\b([0-9]+(?:\.[0-9]+)?)\s*/\s*([0-9]+(?:\.[0-9]+)?)\b", text)
+    if frac and float(frac.group(2)) != 0:
+        return float(frac.group(1)) / float(frac.group(2))
+    dec = re.search(r"\b0\.[0-9]+\b", text)
+    if dec:
+        return float(dec.group(0))
+    whole = first_number(text)
+    if whole is not None and 1.0 < whole <= 100.0 and any(w in text for w in ["percent", "pct"]):
+        return whole / 100.0
+    if any(w in text for w in ["one-half", "one half", "half of", "fifty percent"]):
+        return 0.5
+    return None
+
+
+def share_from_value(value, denominator: Optional[float] = None) -> Optional[float]:
+    text = "" if value is None else str(value).strip().lower()
+    if not text or text in {"nan", "none", "null", "not_found", "not applicable", "n/a"}:
+        return None
+    if "%" in text:
+        x = first_number(text)
+        return None if x is None else float(np.clip(x / 100.0, 0.0, 1.0))
+    x = first_number(value)
+    if x is None:
+        return None
+    if 0.0 <= x <= 1.0:
+        return x
+    if 1.0 < x <= 100.0 and any(w in text for w in ["percent", "pct"]):
+        return x / 100.0
+    if denominator and denominator > 0:
+        return float(np.clip(x / denominator, 0.0, 1.0))
+    if 1.0 < x <= 100.0:
+        return x / 100.0
+    return None
+
+
+def proration_factor_from_text(text: str, option: str) -> Optional[float]:
+    text_l = "" if text is None else str(text).lower()
+    option_l = option.lower()
+    windows = []
+    for match in re.finditer(option_l, text_l):
+        start = max(0, match.start() - 120)
+        end = min(len(text_l), match.end() + 180)
+        window = text_l[start:end]
+        if "prorat" in window or "election" in window:
+            windows.append(window)
+    if not windows and option_l in text_l:
+        windows = [text_l]
+    for window in windows:
+        frac = parse_fraction_value(window)
+        if frac is not None:
+            return frac
+    return None
+
+
+def realized_cash_share_and_source(row: pd.Series) -> Tuple[Optional[float], str, float]:
+    shares_out = first_number(row.get("target_shares_outstanding"))
+    cash = share_from_value(row.get("realized_cash_election_demand"), shares_out)
+    if cash is not None:
+        return cash, "direct_realized_cash_election_demand", 1.0
+
+    stock = share_from_value(row.get("realized_stock_election_demand"), shares_out)
+    if stock is not None:
+        return float(np.clip(1.0 - stock, 0.0, 1.0)), "direct_realized_stock_election_demand", 1.0
+
+    cash_cap = parse_fraction_value(row.get("cash_cap"))
+    text = row.get("final_proration_results")
+    source = "final_proration_results_backed_out_from_cap"
+    if text is None or str(text).strip().lower() in {"", "nan", "not_found", "not applicable"}:
+        text = row.get("preliminary_proration_results")
+        source = "preliminary_proration_results_backed_out_from_cap"
+    fill = proration_factor_from_text(str(text), "cash") if text is not None else None
+    if cash_cap is not None and fill and fill > 0:
+        weight = 0.65 if source.startswith("final") else 0.45
+        return float(np.clip(cash_cap / fill, 0.0, 1.0)), source, weight
+    return None, "", 0.0
+
+
+def cap_fraction_from_row(row: pd.Series, field: str) -> Optional[float]:
+    raw = row.get(field)
+    fraction = parse_fraction_value(raw)
+    if fraction is not None:
+        return fraction
+    cap_shares = first_number(raw)
+    shares_out = first_number(row.get("target_shares_outstanding"))
+    if cap_shares is not None and shares_out and shares_out > 0 and cap_shares > 100.0:
+        return float(np.clip(cap_shares / shares_out, 0.0, 1.0))
+    return None
+
+
 def normalize_default_rule(s: pd.Series) -> pd.Series:
     """Returns 'cash', 'stock', 'mixed', or NaN."""
     t = s.astype(str).str.lower()
@@ -180,20 +308,21 @@ def derive_modeling_columns(df: pd.DataFrame) -> pd.DataFrame:
     """Add the columns the EDA + tests need."""
     out = df.copy()
 
-    # Realized cash share — from realized_cash_election_demand if available.
-    # If reported as a percentage (>1), divide by 100. If as fraction, leave.
-    if "realized_cash_election_demand_num" in out.columns:
-        rced = out["realized_cash_election_demand_num"]
-        out["realized_cash_share"] = np.where(rced > 1.0, rced / 100.0, rced)
-    else:
-        out["realized_cash_share"] = np.nan
+    realized = out.apply(realized_cash_share_and_source, axis=1)
+    out["realized_cash_share"] = [x[0] for x in realized]
+    out["realized_label_source"] = [x[1] for x in realized]
+    out["realized_label_quality_weight"] = [x[2] for x in realized]
 
-    # Spread at deadline = cash election value - stock election value per share.
-    # Ideally uses prices ON the election deadline; for V1 we use whatever
-    # acquirer_price the market CSV provides (likely announcement-date).
+    # Spread at trade-entry/election-mechanics date when available, falling back
+    # to the market snapshot price.
     cash_pps = out.get("cash_consideration_per_share_num")
     er = out.get("exchange_ratio_num")
-    acq_p = out.get("acquirer_price")
+    if "entry_acquirer_price" in out.columns:
+        acq_p = out["entry_acquirer_price"].where(out["entry_acquirer_price"].notna(), out.get("acquirer_price"))
+        out["spread_price_source"] = np.where(out["entry_acquirer_price"].notna(), "entry_acquirer_price", "acquirer_price")
+    else:
+        acq_p = out.get("acquirer_price")
+        out["spread_price_source"] = "acquirer_price"
     out["cash_election_value"] = cash_pps
     if er is not None and acq_p is not None:
         out["stock_election_value"] = er * acq_p
@@ -202,10 +331,9 @@ def derive_modeling_columns(df: pd.DataFrame) -> pd.DataFrame:
     out["spread"] = out["cash_election_value"] - out["stock_election_value"]
 
     # Oversubscribed flag (only meaningful when cap is a fraction of total).
-    if "realized_cash_share" in out.columns and "cash_cap_num" in out.columns:
-        cap_frac = np.where(out["cash_cap_num"] <= 1.0, out["cash_cap_num"], np.nan)
-        out["cash_cap_frac"] = cap_frac
-        out["oversubscribed"] = out["realized_cash_share"] > cap_frac
+    if "cash_cap" in out.columns:
+        out["cash_cap_frac"] = out.apply(lambda row: cap_fraction_from_row(row, "cash_cap"), axis=1)
+        out["oversubscribed"] = out["realized_cash_share"] > out["cash_cap_frac"]
     else:
         out["cash_cap_frac"] = np.nan
         out["oversubscribed"] = np.nan
@@ -441,27 +569,60 @@ def run_ks_test_by_default(df: pd.DataFrame, out_dir: Path) -> pd.DataFrame:
 
 
 def fit_active_election_function(df: pd.DataFrame, out_dir: Path) -> Dict:
-    """Empirical p_active(spread): linear fit for V1. Logistic/piecewise can come later."""
+    """Empirical bounded p_active(spread) fit.
+
+    The original V1 used a linear probability model.  For trading, a bounded
+    logistic curve is safer because election probabilities cannot be below zero
+    or above one.  We keep the linear fit columns for continuity.
+    """
     d = df.dropna(subset=["spread", "active_cash_election_rate"])
     if len(d) < 10:
         print(f"[stats] skip active fit: too few rows ({len(d)})", file=sys.stderr)
         return {}
     x = d["spread"].values
     y = d["active_cash_election_rate"].values
-    slope, intercept, r, p, se = stats.linregress(x, y)
+    linear_slope, linear_intercept, linear_r, linear_p, linear_se = stats.linregress(x, y)
+
+    y_clip = np.clip(y, 1e-4, 1.0 - 1e-4)
+    logit_y = np.log(y_clip / (1.0 - y_clip))
+    if "realized_label_quality_weight" in d.columns:
+        w = pd.to_numeric(d["realized_label_quality_weight"], errors="coerce").fillna(0.0).values
+        w = np.where(w > 0, w, 0.25)
+    else:
+        w = np.ones(len(d))
+    X = np.column_stack([np.ones(len(x)), x])
+    Xw = X * np.sqrt(w)[:, None]
+    yw = logit_y * np.sqrt(w)
+    coef, *_ = np.linalg.lstsq(Xw, yw, rcond=None)
+    logistic_intercept = float(coef[0])
+    logistic_slope = float(coef[1])
+    fitted = 1.0 / (1.0 + np.exp(-(logistic_intercept + logistic_slope * x)))
+    resid = y - fitted
+    ss_res = float((resid ** 2).sum())
+    ss_tot = float(((y - y.mean()) ** 2).sum())
+    logistic_r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else np.nan
     out = {
-        "form": "p_active(spread) = intercept + slope * spread",
-        "intercept": intercept,
-        "slope": slope,
-        "r_value": r,
-        "p_value": p,
-        "std_error": se,
+        "form": "p_active(spread) = sigmoid(logistic_intercept + logistic_slope * spread)",
+        "logistic_intercept": logistic_intercept,
+        "logistic_slope": logistic_slope,
+        "logistic_r2_probability_space": logistic_r2,
+        "linear_probability_intercept": linear_intercept,
+        "linear_probability_slope": linear_slope,
+        "linear_probability_r_value": linear_r,
+        "linear_probability_p_value": linear_p,
+        "linear_probability_std_error": linear_se,
         "n": len(d),
+        "effective_n": float(w.sum()),
+        "label_weighting": "realized_label_quality_weight",
     }
     out_path = out_dir / "tables" / "active_election_function.csv"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     pd.DataFrame([out]).to_csv(out_path, index=False)
-    print(f"[stats] p_active(spread): intercept={intercept:.3f}, slope={slope:.4f}, R={r:.3f}", file=sys.stderr)
+    print(
+        f"[stats] bounded p_active(spread): intercept={logistic_intercept:.3f}, "
+        f"slope={logistic_slope:.4f}, R2={logistic_r2:.3f}",
+        file=sys.stderr,
+    )
     return out
 
 
@@ -485,8 +646,10 @@ def write_summary(df: pd.DataFrame, out_dir: Path) -> None:
 - Lent shares are passive (uses `passive_control_percent` from the WRDS
   ownership pipeline, which folds in N-PORT on-loan balances).
 - Passive investors take the default rule deterministically.
-- `p_active(spread)` is fit as a simple linear function for V1; logistic
-  or piecewise refinement can come later.
+- Realized labels carry a source/quality flag; direct realized-demand labels
+  receive full weight, while proration-backed-out labels receive lower weight.
+- `p_active(spread)` is fit as a bounded logistic function, with the older
+  linear probability coefficients preserved for diagnostics.
 
 ## Outputs
 
@@ -507,13 +670,12 @@ def write_summary(df: pd.DataFrame, out_dir: Path) -> None:
 ## Known caveats
 
 - **Spread proxy.** This version uses whatever `acquirer_price` the market CSV
-  provides (likely announcement-date). The active election function should
-  ideally be fit on the *deadline-date* spread. Worth re-running once the
-  market script is extended to pull deadline-date prices.
+  provides when `entry_acquirer_price` is missing. The active election function
+  should ideally be fit on the *deadline-date* spread.
 - **Numeric coercion of Claude outputs.** `realized_cash_election_demand` and
-  related fields come back as free-text; we extract the first number. Manual
-  review of edge cases (e.g. fields containing dollar amounts vs. percentages)
-  is recommended.
+  related fields come back as free-text; this script now separates percentages,
+  share counts, and proration-backed-out labels, but manual review of edge cases
+  remains recommended.
 - **Sample size.** Election deals are rare. With under a few hundred deals,
   statistical power is limited — interpret p-values conservatively and prefer
   effect-size thinking over significance thresholds.

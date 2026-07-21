@@ -16,8 +16,10 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import hashlib
 import json
 import math
+import random
 import re
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -25,6 +27,66 @@ import pandas as pd
 
 
 EPS = 1e-12
+NEG_INF = -1e18
+
+
+def arg_value(args: argparse.Namespace, name: str, default: Any) -> Any:
+    return getattr(args, name, default)
+
+
+def bounded_prob(value: Optional[float], default: Optional[float] = None) -> Optional[float]:
+    if value is None or not math.isfinite(value):
+        return default
+    return max(0.0, min(1.0, value))
+
+
+def stable_seed(base_seed: int, *parts: Any) -> int:
+    token = "|".join([str(base_seed), *(str(p) for p in parts)])
+    return int(hashlib.sha256(token.encode("utf-8")).hexdigest()[:16], 16)
+
+
+def quantile(values: List[float], q: float) -> Optional[float]:
+    clean = sorted(v for v in values if v is not None and math.isfinite(v))
+    if not clean:
+        return None
+    if len(clean) == 1:
+        return clean[0]
+    q = max(0.0, min(1.0, q))
+    pos = q * (len(clean) - 1)
+    lo = int(math.floor(pos))
+    hi = int(math.ceil(pos))
+    if lo == hi:
+        return clean[lo]
+    weight = pos - lo
+    return clean[lo] * (1.0 - weight) + clean[hi] * weight
+
+
+def mean_or_none(values: List[float]) -> Optional[float]:
+    clean = [v for v in values if v is not None and math.isfinite(v)]
+    if not clean:
+        return None
+    return sum(clean) / len(clean)
+
+
+def parse_date(value: Any) -> Optional[dt.date]:
+    text = clean_str(value)
+    if not text:
+        return None
+    try:
+        parsed = pd.to_datetime(text, errors="coerce")
+        if pd.isna(parsed):
+            return None
+        return parsed.date()
+    except Exception:
+        return None
+
+
+def elapsed_days(start: Any, end: Any, fallback: int) -> int:
+    start_date = parse_date(start)
+    end_date = parse_date(end)
+    if start_date and end_date and end_date >= start_date:
+        return max(1, (end_date - start_date).days)
+    return max(1, int(fallback))
 
 
 def clean_str(value: Any) -> str:
@@ -226,9 +288,9 @@ def observed_election_shares(row: pd.Series) -> Tuple[Optional[float], Optional[
     )
     source = ""
     if cash is not None:
-        source = "realized_cash_election_demand"
+        source = "direct_realized_cash_election_demand"
     if stock is not None and not source:
-        source = "realized_stock_election_demand"
+        source = "direct_realized_stock_election_demand"
     if cash is not None and stock is None:
         stock = max(0.0, 1.0 - cash)
     if stock is not None and cash is None:
@@ -238,6 +300,29 @@ def observed_election_shares(row: pd.Series) -> Tuple[Optional[float], Optional[
     return bounded_share(cash), bounded_share(stock), source
 
 
+def cap_fraction_from_row(row: pd.Series, names: Iterable[str]) -> Optional[float]:
+    raw = first_present(row, names)
+    fraction = parse_fraction(raw)
+    if fraction is not None:
+        return fraction
+    cap_shares = numeric_value(raw)
+    shares_out = numeric_value(row.get("target_shares_outstanding"))
+    if cap_shares is not None and shares_out and shares_out > 0 and cap_shares > 100.0:
+        return bounded_share(cap_shares / shares_out)
+    return None
+
+
+def label_quality_weight(source: str) -> float:
+    text = clean_str(source).lower()
+    if text.startswith("direct_realized_cash") or text.startswith("direct_realized_stock"):
+        return 1.0
+    if "final_proration_results_backed_out" in text:
+        return 0.65
+    if "preliminary" in text:
+        return 0.45
+    return 0.0
+
+
 def event_terms(row: pd.Series) -> Dict[str, Any]:
     cash = parse_money(first_present(row, ["cash_consideration_per_share_num", "cash_consideration_per_share"]))
     exchange_ratio = parse_exchange_ratio(first_present(row, ["exchange_ratio_num", "exchange_ratio"]))
@@ -245,8 +330,8 @@ def event_terms(row: pd.Series) -> Dict[str, Any]:
     entry_acquirer = numeric_value(first_present(row, ["entry_acquirer_price", "acquirer_price"]))
     exit_acquirer = numeric_value(first_present(row, ["exit_acquirer_price", "acquirer_price", "entry_acquirer_price"]))
     passive = bounded_share(numeric_value(first_present(row, ["passive_control_percent", "etf_ownership_percent"]))) or 0.0
-    cash_cap = parse_fraction(first_present(row, ["cash_cap_fraction", "cash_cap"]))
-    stock_cap = parse_fraction(first_present(row, ["stock_cap_fraction", "stock_cap"]))
+    cash_cap = cap_fraction_from_row(row, ["cash_cap_fraction", "cash_cap"])
+    stock_cap = cap_fraction_from_row(row, ["stock_cap_fraction", "stock_cap"])
     if cash_cap is None and stock_cap is not None:
         cash_cap = max(0.0, 1.0 - stock_cap)
     if stock_cap is None and cash_cap is not None:
@@ -260,11 +345,18 @@ def event_terms(row: pd.Series) -> Dict[str, Any]:
         "entry_target_price": entry_target,
         "entry_acquirer_price": entry_acquirer,
         "exit_acquirer_price": exit_acquirer,
+        "entry_rule_date": first_present(row, ["entry_rule_date", "election_deadline"]),
+        "exit_result_date": first_present(row, ["exit_result_date", "closing_date", "deal_completion_date"]),
         "stock_value": stock_value,
         "passive_share": passive,
         "cash_cap": bounded_share(cash_cap),
         "stock_cap": bounded_share(stock_cap),
         "default_rule": default_rule(row),
+        "target_bid_ask_spread_pct": bounded_share(numeric_value(first_present(row, ["target_bid_ask_spread_pct", "target_spread_pct"]))),
+        "acquirer_bid_ask_spread_pct": bounded_share(numeric_value(first_present(row, ["acquirer_bid_ask_spread_pct", "acquirer_spread_pct"]))),
+        "short_volume_ratio": bounded_share(numeric_value(first_present(row, ["short_volume_ratio", "short_volume_ratio_20d_avg"]))),
+        "deal_break_probability": bounded_share(numeric_value(first_present(row, ["deal_break_probability", "deal_break_prob", "p_break"]))),
+        "break_price": numeric_value(first_present(row, ["break_price", "standalone_target_price", "unaffected_target_price"])),
     }
 
 
@@ -387,6 +479,214 @@ def ev_for_choice(terms: Dict[str, Any], choice: str, cash_fill: float, stock_fi
     return value - terms["entry_target_price"]
 
 
+def hedge_shares_per_target(terms: Dict[str, Any], expected_stock_fraction: float, args: argparse.Namespace) -> float:
+    entry_target = terms.get("entry_target_price")
+    entry_acq = terms.get("entry_acquirer_price")
+    ratio = terms.get("exchange_ratio") or 0.0
+    policy = arg_value(args, "own_hedge_policy", "conversion_expected")
+    if policy == "dollar_neutral":
+        if entry_target is None or entry_acq is None or entry_acq <= 0:
+            return 0.0
+        return max(0.0, entry_target / entry_acq)
+    if policy == "conversion_expected":
+        return max(0.0, expected_stock_fraction * ratio)
+    return 0.0
+
+
+def holding_days_for_terms(terms: Dict[str, Any], args: argparse.Namespace) -> int:
+    fallback = int(arg_value(args, "holding_period_days", 30))
+    return elapsed_days(terms.get("entry_rule_date"), terms.get("exit_result_date"), fallback)
+
+
+def trading_cost_per_target_share(
+    terms: Dict[str, Any],
+    expected_stock_fraction: float,
+    args: argparse.Namespace,
+) -> Tuple[float, float, float]:
+    entry_target = terms.get("entry_target_price") or 0.0
+    entry_acq = terms.get("entry_acquirer_price") or 0.0
+    short_ratio = hedge_shares_per_target(terms, expected_stock_fraction, args)
+    target_bps = float(arg_value(args, "trading_cost_bps", 0.0))
+    acq_bps = arg_value(args, "acquirer_trading_cost_bps", None)
+    if acq_bps is None:
+        acq_bps = target_bps
+    base_cost = entry_target * target_bps / 10000.0
+    base_cost += short_ratio * entry_acq * float(acq_bps) / 10000.0
+
+    bid_ask_cost = 0.0
+    if bool(arg_value(args, "use_bid_ask_costs", True)):
+        target_spread = terms.get("target_bid_ask_spread_pct")
+        acq_spread = terms.get("acquirer_bid_ask_spread_pct")
+        if target_spread is not None:
+            bid_ask_cost += 0.5 * entry_target * float(target_spread)
+        if acq_spread is not None:
+            # Short entry plus cover is roughly two half-spreads.
+            bid_ask_cost += short_ratio * entry_acq * float(acq_spread)
+    return base_cost + bid_ask_cost, base_cost, bid_ask_cost
+
+
+def borrow_cost_per_target_share(
+    terms: Dict[str, Any],
+    expected_stock_fraction: float,
+    args: argparse.Namespace,
+) -> float:
+    entry_acq = terms.get("entry_acquirer_price") or 0.0
+    short_ratio = hedge_shares_per_target(terms, expected_stock_fraction, args)
+    annual_bps = float(arg_value(args, "annual_borrow_cost_bps", 0.0))
+    days = holding_days_for_terms(terms, args)
+    dynamic = short_ratio * entry_acq * annual_bps / 10000.0 * days / 365.0
+    return dynamic + float(arg_value(args, "borrow_cost_per_share_constant", 0.0))
+
+
+def net_alpha_for_choice(
+    terms: Dict[str, Any],
+    gross_alpha: Optional[float],
+    expected_stock_fraction: float,
+    args: argparse.Namespace,
+) -> Dict[str, Optional[float]]:
+    if gross_alpha is None:
+        return {
+            "net_alpha_per_share": None,
+            "trading_cost_per_share": None,
+            "borrow_cost_per_share": None,
+            "total_cost_per_share": None,
+            "hedge_ratio_acquirer_short_per_target": None,
+        }
+    trading_cost, fixed_cost, bid_ask_cost = trading_cost_per_target_share(terms, expected_stock_fraction, args)
+    borrow_cost = borrow_cost_per_target_share(terms, expected_stock_fraction, args)
+    total_cost = trading_cost + borrow_cost
+    return {
+        "net_alpha_per_share": gross_alpha - total_cost,
+        "trading_cost_per_share": trading_cost,
+        "fixed_trading_cost_per_share": fixed_cost,
+        "bid_ask_cost_per_share": bid_ask_cost,
+        "borrow_cost_per_share": borrow_cost,
+        "total_cost_per_share": total_cost,
+        "hedge_ratio_acquirer_short_per_target": hedge_shares_per_target(terms, expected_stock_fraction, args),
+    }
+
+
+def deal_break_probability(row: pd.Series, terms: Dict[str, Any], args: argparse.Namespace) -> float:
+    event_prob = terms.get("deal_break_probability")
+    if event_prob is not None:
+        return bounded_prob(float(event_prob), 0.0) or 0.0
+    return bounded_prob(float(arg_value(args, "deal_break_prob", 0.0)), 0.0) or 0.0
+
+
+def break_alpha_for_choice(
+    terms: Dict[str, Any],
+    expected_stock_fraction: float,
+    args: argparse.Namespace,
+) -> Optional[float]:
+    entry_target = terms.get("entry_target_price")
+    entry_acq = terms.get("entry_acquirer_price")
+    if entry_target is None or entry_acq is None:
+        return None
+    break_price = terms.get("break_price")
+    if break_price is None:
+        break_price = entry_target * (1.0 - float(arg_value(args, "break_loss_pct", 0.30)))
+    acq_break_price = entry_acq * (1.0 + float(arg_value(args, "acquirer_break_return_pct", 0.0)))
+    short_ratio = hedge_shares_per_target(terms, expected_stock_fraction, args)
+    gross = (break_price - entry_target) + short_ratio * (entry_acq - acq_break_price)
+    costs = net_alpha_for_choice(terms, gross, expected_stock_fraction, args)
+    return costs["net_alpha_per_share"]
+
+
+def summarize_draws(values: List[float], prefix: str) -> Dict[str, Optional[float]]:
+    p05 = quantile(values, 0.05)
+    out: Dict[str, Optional[float]] = {
+        f"{prefix}_mean": mean_or_none(values),
+        f"{prefix}_p05": p05,
+        f"{prefix}_p50": quantile(values, 0.50),
+        f"{prefix}_p95": quantile(values, 0.95),
+    }
+    if p05 is None:
+        out[f"{prefix}_cvar05"] = None
+    else:
+        tail = [v for v in values if v <= p05]
+        out[f"{prefix}_cvar05"] = mean_or_none(tail)
+    return out
+
+
+def simulate_choice_distribution(
+    row: pd.Series,
+    terms: Dict[str, Any],
+    pred: Dict[str, Any],
+    choice: str,
+    own_share: float,
+    deterministic_expected_stock_fraction: float,
+    args: argparse.Namespace,
+) -> Dict[str, Any]:
+    draws = int(arg_value(args, "mc_draws", 0))
+    if draws <= 0:
+        return {}
+
+    mean_cash = bounded_prob(pred.get("predicted_cash_demand_share"), 0.5) or 0.5
+    concentration = max(2.0, float(arg_value(args, "mc_demand_concentration", 75.0)))
+    min_alpha = max(0.01, float(arg_value(args, "mc_min_beta_alpha", 0.25)))
+    a = max(min_alpha, mean_cash * concentration)
+    b = max(min_alpha, (1.0 - mean_cash) * concentration)
+    p_break = deal_break_probability(row, terms, args)
+    break_alpha = break_alpha_for_choice(terms, deterministic_expected_stock_fraction, args)
+
+    rng = random.Random(stable_seed(int(arg_value(args, "mc_seed", 1729)), row.get("event_id", ""), choice))
+    net_alphas: List[float] = []
+    gross_alphas: List[float] = []
+    cash_fills: List[float] = []
+    stock_fills: List[float] = []
+    cash_demands: List[float] = []
+    stock_demands: List[float] = []
+    expected_cash_fractions: List[float] = []
+    expected_stock_fractions: List[float] = []
+
+    for _ in range(draws):
+        if p_break > 0.0 and break_alpha is not None and rng.random() < p_break:
+            net_alphas.append(float(break_alpha))
+            continue
+
+        cash_sample = rng.betavariate(a, b)
+        stock_sample = 1.0 - cash_sample
+        cash_d, stock_d = demands_with_own_vote(cash_sample, stock_sample, own_share, choice)
+        fills = fill_rates(cash_d, stock_d, terms["cash_cap"], terms["stock_cap"], prefix="")
+        gross = ev_for_choice(terms, choice, fills["cash_fill_rate"], fills["stock_fill_rate"])
+        cash_fraction, stock_fraction = receipt_mix(choice, fills["cash_fill_rate"], fills["stock_fill_rate"])
+        if gross is None or cash_fraction is None or stock_fraction is None:
+            continue
+        costs = net_alpha_for_choice(terms, gross, stock_fraction, args)
+        net = costs["net_alpha_per_share"]
+        if net is None:
+            continue
+        net_alphas.append(float(net))
+        gross_alphas.append(float(gross))
+        cash_fills.append(float(fills["cash_fill_rate"]))
+        stock_fills.append(float(fills["stock_fill_rate"]))
+        cash_demands.append(float(cash_d))
+        stock_demands.append(float(stock_d))
+        expected_cash_fractions.append(float(cash_fraction))
+        expected_stock_fractions.append(float(stock_fraction))
+
+    out: Dict[str, Any] = {
+        "mc_draws": draws,
+        "mc_effective_draws": len(net_alphas),
+        "mc_cash_demand_mean_input": mean_cash,
+        "mc_demand_concentration": concentration,
+        "mc_deal_break_probability": p_break,
+        "mc_break_net_alpha_per_share": break_alpha,
+        "mc_loss_probability": (
+            sum(1 for v in net_alphas if v < 0.0) / len(net_alphas) if net_alphas else None
+        ),
+    }
+    out.update(summarize_draws(net_alphas, "mc_net_alpha_per_share"))
+    out.update(summarize_draws(gross_alphas, "mc_gross_alpha_per_share"))
+    out.update(summarize_draws(cash_fills, "mc_cash_fill_rate"))
+    out.update(summarize_draws(stock_fills, "mc_stock_fill_rate"))
+    out.update(summarize_draws(cash_demands, "mc_cash_demand_share"))
+    out.update(summarize_draws(stock_demands, "mc_stock_demand_share"))
+    out.update(summarize_draws(expected_cash_fractions, "mc_expected_cash_fraction"))
+    out.update(summarize_draws(expected_stock_fractions, "mc_expected_stock_fraction"))
+    return out
+
+
 def own_vote_share(row: pd.Series, notional: float, entry_target_price: Optional[float]) -> float:
     shares_out = numeric_value(row.get("target_shares_outstanding"))
     if shares_out is None or shares_out <= 0 or entry_target_price is None or entry_target_price <= 0:
@@ -415,15 +715,24 @@ def fit_p_q(
     default_p: float,
     default_q: float,
 ) -> Dict[str, Any]:
-    usable: List[Tuple[pd.Series, float]] = []
+    usable: List[Tuple[pd.Series, float, float, str]] = []
     for row in rows:
-        y, _, _ = observed_election_shares(row)
+        y, _, source = observed_election_shares(row)
         if y is not None:
             pred0 = predict_votes(row, default_p, default_q)
             if pred0.get("model_status") == "ok":
-                usable.append((row, y))
+                weight = label_quality_weight(source)
+                if weight > 0:
+                    usable.append((row, y, weight, source))
     if not usable:
-        return {"p_hat": default_p, "q_hat": default_q, "fit_n": 0, "fit_sse": None, "fit_loglike": None}
+        return {
+            "p_hat": default_p,
+            "q_hat": default_q,
+            "fit_n": 0,
+            "fit_effective_n": 0.0,
+            "fit_sse": None,
+            "fit_loglike": None,
+        }
 
     best = {"p_hat": default_p, "q_hat": default_q, "fit_sse": float("inf")}
     p_den = max(1, p_grid_size - 1)
@@ -434,19 +743,22 @@ def fit_p_q(
             q = iq / q_den
             sse = 0.0
             ok = 0
-            for row, y in usable:
+            total_weight = 0.0
+            for row, y, weight, _ in usable:
                 pred = predict_votes(row, p, q)
                 mu = pred.get("predicted_cash_demand_share")
                 if mu is None:
                     continue
-                sse += (float(y) - float(mu)) ** 2
+                sse += weight * (float(y) - float(mu)) ** 2
+                total_weight += weight
                 ok += 1
             if ok and sse < best["fit_sse"]:
                 best = {"p_hat": p, "q_hat": q, "fit_sse": sse}
     n = len(usable)
-    sigma2 = max(best["fit_sse"] / max(1, n), 0.01 ** 2)
-    loglike = -0.5 * n * (math.log(2.0 * math.pi * sigma2) + 1.0)
-    best.update({"fit_n": n, "fit_loglike": loglike})
+    effective_n = sum(weight for _, _, weight, _ in usable)
+    sigma2 = max(best["fit_sse"] / max(EPS, effective_n), 0.01 ** 2)
+    loglike = -0.5 * effective_n * (math.log(2.0 * math.pi * sigma2) + 1.0)
+    best.update({"fit_n": n, "fit_effective_n": effective_n, "fit_loglike": loglike})
     return best
 
 
@@ -481,7 +793,23 @@ def realized_pnl(
     cash_received = target_shares * cash_fraction * cash_value
     acq_shares_received = target_shares * stock_fraction * ratio
     short_pnl = short_acquirer_shares * (entry_acq - exit_acq)
-    return cash_received + acq_shares_received * exit_acq - args.trade_notional + short_pnl
+    gross_pnl = cash_received + acq_shares_received * exit_acq - args.trade_notional + short_pnl
+    per_share_cost = net_alpha_for_choice(terms, 0.0, expected_stock_fraction, args)["total_cost_per_share"] or 0.0
+    return gross_pnl - target_shares * per_share_cost
+
+
+def choice_decision_value(choice_row: Dict[str, Any], args: argparse.Namespace) -> Optional[float]:
+    metric = str(arg_value(args, "trade_decision_metric", "mean")).lower()
+    if metric == "deterministic":
+        return choice_row.get("deterministic_net_alpha_per_share")
+    if metric == "p05":
+        value = choice_row.get("mc_net_alpha_per_share_p05")
+        return value if value is not None else choice_row.get("deterministic_net_alpha_per_share")
+    if metric == "cvar05":
+        value = choice_row.get("mc_net_alpha_per_share_cvar05")
+        return value if value is not None else choice_row.get("deterministic_net_alpha_per_share")
+    value = choice_row.get("mc_net_alpha_per_share_mean")
+    return value if value is not None else choice_row.get("deterministic_net_alpha_per_share")
 
 
 def choose_trade_and_backtest(row: pd.Series, pred: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any]:
@@ -501,59 +829,106 @@ def choose_trade_and_backtest(row: pd.Series, pred: Dict[str, Any], args: argpar
             choice,
         )
         fills = fill_rates(cash_d, stock_d, terms["cash_cap"], terms["stock_cap"], prefix="")
-        ev = ev_for_choice(terms, choice, fills["cash_fill_rate"], fills["stock_fill_rate"])
+        gross_alpha = ev_for_choice(terms, choice, fills["cash_fill_rate"], fills["stock_fill_rate"])
         cash_fraction, stock_fraction = receipt_mix(choice, fills["cash_fill_rate"], fills["stock_fill_rate"])
+        expected_stock_fraction = stock_fraction or 0.0
+        costs = net_alpha_for_choice(terms, gross_alpha, expected_stock_fraction, args)
         choices[choice] = {
             "cash_demand_with_own": cash_d,
             "stock_demand_with_own": stock_d,
             "cash_fill": fills["cash_fill_rate"],
             "stock_fill": fills["stock_fill_rate"],
-            "cap_adjusted_ev_per_share": ev,
+            # Backward-compatible column name: this is alpha over entry target price.
+            "cap_adjusted_ev_per_share": gross_alpha,
+            "deterministic_gross_alpha_per_share": gross_alpha,
+            "deterministic_net_alpha_per_share": costs["net_alpha_per_share"],
+            "deterministic_trading_cost_per_share": costs["trading_cost_per_share"],
+            "deterministic_fixed_trading_cost_per_share": costs["fixed_trading_cost_per_share"],
+            "deterministic_bid_ask_cost_per_share": costs["bid_ask_cost_per_share"],
+            "deterministic_borrow_cost_per_share": costs["borrow_cost_per_share"],
+            "deterministic_total_cost_per_share": costs["total_cost_per_share"],
+            "hedge_ratio_acquirer_short_per_target": costs["hedge_ratio_acquirer_short_per_target"],
             "expected_cash_fraction": cash_fraction,
             "expected_stock_fraction": stock_fraction,
         }
+        mc = simulate_choice_distribution(
+            row=row,
+            terms=terms,
+            pred=pred,
+            choice=choice,
+            own_share=own,
+            deterministic_expected_stock_fraction=expected_stock_fraction,
+            args=args,
+        )
+        choices[choice].update(mc)
 
-    best_choice = max(choices, key=lambda c: choices[c]["cap_adjusted_ev_per_share"] if choices[c]["cap_adjusted_ev_per_share"] is not None else -1e9)
+    best_choice = max(
+        choices,
+        key=lambda c: choice_decision_value(choices[c], args)
+        if choice_decision_value(choices[c], args) is not None
+        else NEG_INF,
+    )
     best_ev = choices[best_choice]["cap_adjusted_ev_per_share"]
+    best_net = choices[best_choice].get("deterministic_net_alpha_per_share")
+    best_decision_value = choice_decision_value(choices[best_choice], args)
+    best_p05 = choices[best_choice].get("mc_net_alpha_per_share_p05")
+    best_cvar05 = choices[best_choice].get("mc_net_alpha_per_share_cvar05")
+    best_loss_probability = choices[best_choice].get("mc_loss_probability")
+    min_p05 = float(arg_value(args, "min_p05_net_alpha", NEG_INF))
+    max_loss_prob = float(arg_value(args, "max_loss_probability", 1.0))
     if pred["cash_ev_uncapped_per_share"] < 0.0 and pred["stock_ev_uncapped_per_share"] < 0.0:
         signal = "no_trade"
         reason = "both_uncapped_evs_negative_rational_exit"
-    elif best_ev is None or best_ev < args.min_net_alpha:
+    elif best_decision_value is None or best_decision_value < args.min_net_alpha:
         signal = "no_trade"
-        reason = "cap_adjusted_ev_below_threshold"
+        reason = "risk_adjusted_alpha_below_threshold"
+    elif best_p05 is not None and best_p05 < min_p05:
+        signal = "no_trade"
+        reason = "mc_p05_alpha_below_threshold"
+    elif best_loss_probability is not None and best_loss_probability > max_loss_prob:
+        signal = "no_trade"
+        reason = "mc_loss_probability_above_threshold"
     else:
         signal = f"trade_{best_choice}_election"
-        reason = "cap_adjusted_ev_positive"
+        reason = "risk_adjusted_alpha_positive"
 
     obs_cash, obs_stock, obs_source = observed_election_shares(row)
+    realized_label_available = bool(obs_source and obs_cash is not None and obs_stock is not None)
     actual_source = obs_source or "predicted_proxy_no_realized_label"
     if obs_cash is None or obs_stock is None:
         obs_cash = pred["predicted_cash_demand_share"]
         obs_stock = pred["predicted_stock_demand_share"]
 
-    realized_by_choice: Dict[str, Dict[str, Any]] = {}
+    pnl_by_choice: Dict[str, Dict[str, Any]] = {}
     for choice in ["cash", "stock"]:
         cash_d, stock_d = demands_with_own_vote(obs_cash, obs_stock, own if signal.startswith("trade") else 0.0, choice)
         fills = fill_rates(cash_d, stock_d, terms["cash_cap"], terms["stock_cap"], prefix="")
         expected_stock_fraction = choices[choice]["expected_stock_fraction"] or 0.0
         pnl = realized_pnl(row, terms, choice, fills["cash_fill_rate"], fills["stock_fill_rate"], expected_stock_fraction, args)
-        realized_by_choice[choice] = {
+        pnl_by_choice[choice] = {
             "actual_cash_demand_with_own": cash_d,
             "actual_stock_demand_with_own": stock_d,
             "actual_cash_fill": fills["cash_fill_rate"],
             "actual_stock_fill": fills["stock_fill_rate"],
+            "pnl": pnl,
             "realized_pnl": pnl,
         }
 
     executed_choice = best_choice if signal.startswith("trade") else ""
-    executed_pnl = realized_by_choice[best_choice]["realized_pnl"] if executed_choice else None
-    best_realized_choice = max(
-        realized_by_choice,
-        key=lambda c: realized_by_choice[c]["realized_pnl"] if realized_by_choice[c]["realized_pnl"] is not None else -1e18,
+    executed_pnl_or_proxy = pnl_by_choice[best_choice]["pnl"] if executed_choice else None
+    best_pnl_choice = max(
+        pnl_by_choice,
+        key=lambda c: pnl_by_choice[c]["pnl"] if pnl_by_choice[c]["pnl"] is not None else NEG_INF,
     )
-    best_realized_pnl = realized_by_choice[best_realized_choice]["realized_pnl"]
-    missed = bool((not signal.startswith("trade")) and best_realized_pnl is not None and best_realized_pnl > 0.0)
-    loss = bool(signal.startswith("trade") and executed_pnl is not None and executed_pnl < 0.0)
+    best_pnl = pnl_by_choice[best_pnl_choice]["pnl"]
+    executed_realized_pnl = executed_pnl_or_proxy if realized_label_available else None
+    executed_proxy_pnl = executed_pnl_or_proxy if not realized_label_available else None
+    best_realized_pnl = best_pnl if realized_label_available else None
+    best_proxy_pnl = best_pnl if not realized_label_available else None
+    missed = bool(realized_label_available and (not signal.startswith("trade")) and best_realized_pnl is not None and best_realized_pnl > 0.0)
+    loss = bool(realized_label_available and signal.startswith("trade") and executed_realized_pnl is not None and executed_realized_pnl < 0.0)
+    proxy_missed = bool((not realized_label_available) and (not signal.startswith("trade")) and best_proxy_pnl is not None and best_proxy_pnl > 0.0)
+    proxy_loss = bool((not realized_label_available) and signal.startswith("trade") and executed_proxy_pnl is not None and executed_proxy_pnl < 0.0)
 
     out = {
         "strategy_signal": signal,
@@ -561,19 +936,34 @@ def choose_trade_and_backtest(row: pd.Series, pred: Dict[str, Any], args: argpar
         "own_vote_share": own,
         "chosen_election": executed_choice,
         "expected_ev_per_share": best_ev,
-        "expected_pnl_notional": best_ev * args.trade_notional / terms["entry_target_price"] if best_ev is not None and terms["entry_target_price"] else None,
+        "expected_net_alpha_per_share": best_net,
+        "trade_decision_metric": str(arg_value(args, "trade_decision_metric", "mean")),
+        "trade_decision_value": best_decision_value,
+        "trade_decision_p05_net_alpha": best_p05,
+        "trade_decision_cvar05_net_alpha": best_cvar05,
+        "trade_decision_loss_probability": best_loss_probability,
+        "expected_pnl_notional": best_decision_value * args.trade_notional / terms["entry_target_price"]
+        if best_decision_value is not None and terms["entry_target_price"]
+        else None,
+        "realized_label_available": realized_label_available,
+        "realized_label_quality_weight": label_quality_weight(obs_source),
         "realized_label_source": actual_source,
         "observed_cash_demand_share": obs_cash,
         "observed_stock_demand_share": obs_stock,
-        "executed_realized_pnl": executed_pnl,
-        "best_realized_choice": best_realized_choice,
+        "executed_realized_pnl": executed_realized_pnl,
+        "executed_proxy_pnl": executed_proxy_pnl,
+        "best_realized_choice": best_pnl_choice if realized_label_available else "",
         "best_realized_pnl": best_realized_pnl,
+        "best_proxy_choice": best_pnl_choice if not realized_label_available else "",
+        "best_proxy_pnl": best_proxy_pnl,
         "missed_arbitrage": missed,
         "loss_trade": loss,
+        "proxy_missed_arbitrage": proxy_missed,
+        "proxy_loss_trade": proxy_loss,
     }
     for choice, vals in choices.items():
         out.update({f"{choice}_{k}": v for k, v in vals.items()})
-    for choice, vals in realized_by_choice.items():
+    for choice, vals in pnl_by_choice.items():
         out.update({f"{choice}_{k}": v for k, v in vals.items()})
     return out
 
@@ -627,18 +1017,34 @@ def run_structural_backtest(panel: pd.DataFrame, args: argparse.Namespace) -> Tu
     predictions = pd.DataFrame(prediction_rows)
     parameters = pd.DataFrame(parameter_rows)
     traded = predictions["strategy_signal"].astype(str).str.startswith("trade") if not predictions.empty else pd.Series(dtype=bool)
-    executed_pnl = pd.to_numeric(predictions.get("executed_realized_pnl"), errors="coerce") if not predictions.empty else pd.Series(dtype=float)
+    label_available = predictions.get("realized_label_available", pd.Series(dtype=bool)).fillna(False).astype(bool) if not predictions.empty else pd.Series(dtype=bool)
+    executed_realized_pnl = pd.to_numeric(predictions.get("executed_realized_pnl"), errors="coerce") if not predictions.empty else pd.Series(dtype=float)
+    executed_proxy_pnl = pd.to_numeric(predictions.get("executed_proxy_pnl"), errors="coerce") if not predictions.empty else pd.Series(dtype=float)
+    realized_trades = traded & label_available if not predictions.empty else pd.Series(dtype=bool)
+    proxy_trades = traded & ~label_available if not predictions.empty else pd.Series(dtype=bool)
     summary = {
         "event_count": int(len(predictions)),
         "fit_event_count": int(parameters["fit_n"].gt(0).sum()) if not parameters.empty and "fit_n" in parameters else 0,
+        "labeled_event_count": int(label_available.sum()) if not predictions.empty else 0,
         "trade_count": int(traded.sum()) if not predictions.empty else 0,
+        "realized_label_trade_count": int(realized_trades.sum()) if not predictions.empty else 0,
+        "proxy_trade_count": int(proxy_trades.sum()) if not predictions.empty else 0,
         "missed_arbitrage_count": int(predictions.get("missed_arbitrage", pd.Series(dtype=bool)).fillna(False).sum()) if not predictions.empty else 0,
         "loss_trade_count": int(predictions.get("loss_trade", pd.Series(dtype=bool)).fillna(False).sum()) if not predictions.empty else 0,
-        "average_pnl_per_trade": float(executed_pnl[traded].mean()) if not predictions.empty and traded.any() else None,
-        "total_pnl": float(executed_pnl[traded].sum()) if not predictions.empty and traded.any() else 0.0,
+        "proxy_missed_arbitrage_count": int(predictions.get("proxy_missed_arbitrage", pd.Series(dtype=bool)).fillna(False).sum()) if not predictions.empty else 0,
+        "proxy_loss_trade_count": int(predictions.get("proxy_loss_trade", pd.Series(dtype=bool)).fillna(False).sum()) if not predictions.empty else 0,
+        "average_realized_pnl_per_labeled_trade": float(executed_realized_pnl[realized_trades].mean()) if not predictions.empty and realized_trades.any() else None,
+        "total_realized_pnl_labeled_trades": float(executed_realized_pnl[realized_trades].sum()) if not predictions.empty and realized_trades.any() else 0.0,
+        "average_proxy_pnl_per_proxy_trade": float(executed_proxy_pnl[proxy_trades].mean()) if not predictions.empty and proxy_trades.any() else None,
+        "total_proxy_pnl_proxy_trades": float(executed_proxy_pnl[proxy_trades].sum()) if not predictions.empty and proxy_trades.any() else 0.0,
         "trade_notional": float(args.trade_notional),
-        "borrow_cost_assumption": 0.0,
+        "borrow_cost_assumption": {
+            "borrow_cost_per_share_constant": float(arg_value(args, "borrow_cost_per_share_constant", 0.0)),
+            "annual_borrow_cost_bps": float(arg_value(args, "annual_borrow_cost_bps", 0.0)),
+        },
         "hedge_policy": args.own_hedge_policy,
+        "trade_decision_metric": str(arg_value(args, "trade_decision_metric", "mean")),
+        "mc_draws": int(arg_value(args, "mc_draws", 0)),
     }
     return predictions, parameters, summary
 
