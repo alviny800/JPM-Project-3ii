@@ -6,7 +6,7 @@ from pptx import Presentation
 from pptx.enum.text import PP_ALIGN
 import update_deck as ud
 
-SRC = "JPM_Project_3ii_week6.pptx"
+SRC = "JPM_Project_3ii_week7.pptx"
 
 
 def title_of(slide):
