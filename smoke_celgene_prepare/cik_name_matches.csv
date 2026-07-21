@@ -1,3 +1,0 @@
-query_name,query_norm,matched,score,cik_int,cik10,ticker,sec_title,sec_norm,match_method,event_idx,side,target_name,acquirer_name,announce_date,payment_type,deal_status
-Celgene Corp,celgene,False,83.33333333333334,1822791,0001822791,CLNN,Clene Inc.,clene,difflib,17,target,Celgene Corp,Bristol-Myers Squibb Co,2019/1/3,Cash and Stock,Completed
-Bristol-Myers Squibb Co,bristol myers squibb,True,100.0,14272,0000014272,BMY,BRISTOL MYERS SQUIBB CO,,exact_norm,17,acquirer,Celgene Corp,Bristol-Myers Squibb Co,2019/1/3,Cash and Stock,Completed
