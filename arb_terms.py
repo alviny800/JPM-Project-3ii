@@ -24,7 +24,7 @@ import re
 import numpy as np
 import pandas as pd
 
-from arb_outcome import normalize_outcome_label
+from arb_outcome import event_status_map_from_bbg, normalize_outcome_label
 
 
 def read_required_csv(path, purpose):
@@ -88,28 +88,39 @@ def build_deals() -> pd.DataFrame:
     fc = norm.set_index("event_id")["pct_elected_cash"].apply(pd.to_numeric, errors="coerce") / 100.0
     d["f_cash"] = d["event_id"].map(fc)
 
-    # Outcome labels are post-outcome labels for backtest/audit only. If the
-    # extraction is absent or unrecognized, leave the label blank rather than
-    # implying the deal completed.
+    # Outcome labels are post-outcome labels for backtest/audit only.  The
+    # authoritative source is the original BBG Deal Status column; Claude's
+    # deal_completion_or_break text is kept only as a last-resort audit fallback.
+    status_map = event_status_map_from_bbg()
     brk = w["deal_completion_or_break"] if "deal_completion_or_break" in w.columns else pd.Series(dtype=str)
 
     def outcome_for(eid):
+        status = status_map.get(str(eid), {})
+        if status.get("deal_outcome_label"):
+            return (
+                status.get("deal_outcome_label", ""),
+                status.get("deal_outcome_source", "bbg_deal_status"),
+                status.get("deal_status_raw", ""),
+            )
+        if status.get("deal_outcome_source"):
+            return "", status.get("deal_outcome_source", ""), status.get("deal_status_raw", "")
         if eid not in getattr(brk, "index", []):
-            return "", "missing_deal_completion_or_break"
+            return "", "missing_bbg_and_claude_deal_status", ""
         raw = brk.get(eid, "")
         label = normalize_outcome_label(raw)
         if label:
-            return label, "deal_completion_or_break"
+            return label, "claude_deal_completion_or_break_fallback", raw
         if re.search(r"break|fail", str(raw), re.I):
-            return "", "deal_completion_or_break_regex_break_unclassified"
-        return "", "unrecognized_or_blank_deal_completion_or_break"
+            return "", "claude_deal_completion_or_break_regex_break_unclassified", raw
+        return "", "unrecognized_or_blank_bbg_and_claude_deal_status", raw
 
     outcomes = d["event_id"].map(lambda e: outcome_for(e))
     d["deal_outcome_label"] = outcomes.map(lambda t: t[0])
     d["deal_outcome_source"] = outcomes.map(lambda t: t[1])
+    d["deal_status_raw"] = outcomes.map(lambda t: t[2])
     d["broke"] = (
         d["deal_outcome_label"].isin(["terminated", "withdrawn"])
-        | d["deal_outcome_source"].eq("deal_completion_or_break_regex_break_unclassified")
+        | d["deal_outcome_source"].str.contains("regex_break_unclassified", na=False)
     )
 
     d["stock_val"] = d["R"] * d["P_acq"]
@@ -123,7 +134,7 @@ def build_deals() -> pd.DataFrame:
     ]
     # keep the analytic columns
     keep = ["event_id", "target_name", "ratio_type", "C", "R", "P_acq", "stock_val", "spread",
-            "pi_cash", "pi_cash_source", "f_cash", "deal_outcome_label", "deal_outcome_source",
+            "pi_cash", "pi_cash_source", "f_cash", "deal_outcome_label", "deal_outcome_source", "deal_status_raw",
             "broke", *optional_probability_cols]
     d = d[keep]
     d.to_csv("arb_deals.csv", index=False)

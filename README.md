@@ -9,8 +9,10 @@ these extractions.
 > **Pipeline status (2026-07):** the extraction and WRDS stages are complete (317 deals → 73 clean
 > election-demand labels, near the disclosure ceiling). The downstream modeling is the finalized
 > Monte Carlo prototype in `ARB_FRAMEWORK.md`: a calibrated demand distribution (KS p=0.96) →
-> proration mechanics → simulated payoff → a trade blotter (31 deals, 22 ENTER, signal skill
-> corr +0.67).
+> proration mechanics → simulated payoff → a risk-aware trade blotter (88 priced signals,
+> 41 long ENTER, 20 passive-settlement REVERSE), with capacity/election-impact sizing.
+> The current strategy summary reports ~$944.3m profit-optimal capacity, ~$123.2m expected
+> P&L, and ~$28.5m covered realized P&L after self-impact election settlement.
 
 ## Core files
 
@@ -36,10 +38,11 @@ these extractions.
 
 - `arb_terms.py` — assembles one clean deal-terms table (`arb_deals.csv`) the model reads.
 - `arb_mc.py` — the engine: demand distribution (Beta) + proration mechanics + per-deal simulation.
-- `arb_outcome.py` — completed/terminated/withdrawn probability adapter for the trade layer. It consumes event-level probabilities when supplied and labels scenario defaults when they are not.
+- `arb_capacity.py` — capacity overlay: rolling structural holder mix, finite target float, ADV participation, noisy/positive/passive holder flow, and our own election's impact on aggregate demand.
+- `arb_outcome.py` — completed/terminated/withdrawn probability adapter for the trade layer. It can train an independent status model from the local Bloomberg `Deal Status` source when present; otherwise it consumes event-level probabilities when supplied and labels scenario defaults when they are not.
 - `arb_backtest.py` — validation: leave-one-out demand calibration + realized-edge event study.
 - `arb_run.py` — driver: runs terms → model → backtest and writes `arb_output/` (figures + summary).
-- `arb_signal.py` — risk-aware trade decision layer: entry, election side, hedge, completed/terminated/withdrawn overlay, p5/CVaR/loss gates, sizing, go/no-go → `arb_signals.csv`.
+- `arb_signal.py` — risk-aware trade decision layer: long election trade, passive-settlement reverse trade, hedge, completed/terminated/withdrawn overlay, p5/CVaR/loss gates, max/optimal capacity sizing, go/no-go → `arb_signals.csv`, `arb_strategy_summary.json`.
 - `deadline_spread.py` — builds the deadline-date election spread and the fixed/floating split.
 - `build_walkthrough.py` — renders the browser walkthrough artifact (`arb_output/walkthrough.html`).
 
@@ -50,8 +53,33 @@ completed/terminated/withdrawn model output is available. The CSV must include `
 `p_completed`, `p_terminated`, and `p_withdrawn` (or the `deal_*_probability` aliases). If those
 inputs are not present, the signal output explicitly marks
 `outcome_probability_source=default_scenario_no_event_probabilities` and uses the configured
-scenario defaults; it does not claim terminated/withdrawn probabilities were trained from the
-current committed files.
+scenario defaults. `REVERSE` signals short the target and hedge the passive stock receipt; they
+do **not** assume the short side can choose an election, so completion liability is the blended
+consideration.
+
+Capacity is explicit in `arb_signals.csv`. Holder composition now uses the older rolling
+structural model instead of a fixed active-holder split: `q_hat` estimates the rational
+EV-sensitive holder share of total target ownership, and `p_hat` estimates the noisy/irrational
+holder cash-election probability from prior disclosed events. Passive ownership remains the
+point-in-time WRDS/ETF estimate; `positive_holder_share_of_active` is only a fallback when the
+rolling estimate is unavailable. For `ENTER`, the model sizes target shares, determines whether
+those shares come from noisy traders, EV-sensitive positive holders, or passive/inactive holders,
+and reruns proration after our own election shifts aggregate demand. For `REVERSE`, the short side
+has no election right: capacity is constrained by inactive borrow and noisy-buyer demand, while
+payoff remains passive blended settlement.
+
+The capacity columns separate:
+
+- `capacity_raw_max_*`: flow/ADV/position maximum.
+- `capacity_max_*`: largest size that still passes the risk gates after self-impact.
+- `capacity_optimal_*`: expected-dollar-P&L maximizing size; legacy `capacity_notional` aliases
+  this value.
+
+Backtest P&L is reported two ways. `baseline` sizes with market impact but accepts the historical
+election result at settlement. `self_impact` changes completed-state election demand using our
+own shares and counterparty election mix before recomputing proration for long ENTER trades.
+REVERSE has no election right, so baseline and self-impact payoff remain passive blended
+settlement.
 
 ## What the SEC script covers
 
@@ -285,6 +313,9 @@ The default structural model assumes zero borrow cost, uses a 1,000,000 dollar t
 - `q`: EV-sensitive rational investors' original target ownership share.
 
 The model rolls by prior labeled events, not by calendar time.  Realized labels come from Claude's `realized_cash_election_demand` / `realized_stock_election_demand` fields when available; missing labels are excluded from fitting.
+The finalized `arb_signal.py` capacity layer now consumes the same rolling structural idea
+directly: event-level `p_hat/q_hat` are estimated from prior disclosed events and written into
+`arb_signals.csv` as `capacity_holder_*` columns.
 
 ## Week-3 EDA and p_active(spread) fitting
 

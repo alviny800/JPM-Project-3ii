@@ -17,29 +17,63 @@ capture more than the average. How much you capture depends on the demand draw �
 |---|---|---|
 | `arb_terms.py` | DATA LAYER — assemble clean deal terms (C, R, P_acq, pi_cash, realized f_cash) | `arb_deals.csv` |
 | `arb_mc.py` | ENGINE — demand model (Beta + spread-conditioning) + proration mechanics + per-deal MC | (importable) |
-| `arb_outcome.py` | OUTCOME ADAPTER — consume completed/terminated/withdrawn probabilities when supplied; otherwise mark scenario defaults | (importable) |
+| `arb_capacity.py` | CAPACITY OVERLAY — rolling structural holder mix, finite float/ADV, noisy vs positive-holder flow, and self-impact on election demand | (importable) |
+| `arb_outcome.py` | OUTCOME ADAPTER — train/consume completed/terminated/withdrawn probabilities; otherwise mark scenario defaults | `deal_outcome_probabilities.csv` when run |
 | `arb_backtest.py` | VALIDATION — (A) leave-one-out calibration, (B) realized-edge event study | `arb_realized_edge.csv` |
 | `arb_run.py` | DRIVER — runs all, writes figures + summary | `arb_output/` |
-| `arb_signal.py` | TRADE LAYER — entry, election side, hedge, sizing, go/no-go rule | `arb_signals.csv` |
+| `arb_signal.py` | TRADE LAYER — long election trade, passive-settlement reverse trade, hedge, max/optimal capacity, go/no-go rule | `arb_signals.csv`, `arb_strategy_summary.json` |
 | `fix_acquirer_prices.py` | recover acquirer prices lost to identifier drift (CUSIP→PERMNO) | appends to `wrds_market_daily.csv` |
 
-Run everything: `.venv/bin/python3 arb_run.py && .venv/bin/python3 arb_signal.py`
+Run everything: `.venv/bin/python3 arb_run.py && .venv/bin/python3 arb_outcome.py && .venv/bin/python3 arb_signal.py --outcome-probs deal_outcome_probabilities.csv`
 
 Optional outcome probabilities: `arb_signal.py --outcome-probs path/to/outcome_probs.csv`.
 That file must be event-level and include `event_id` plus either
 `p_completed/p_terminated/p_withdrawn` (aliases `deal_*_probability` also work) or an aggregate
 `p_break`. If no such file/columns are present, `arb_signals.csv` sets
 `outcome_probability_source=default_scenario_no_event_probabilities`; it does not pretend a
-terminated/withdrawn model has been trained.
+terminated/withdrawn model has been trained. `REVERSE` signals are short-target trades with no
+election right: completion-state liability is the passive blended consideration, not the
+optimal elected payoff.
+
+Capacity is not a cosmetic multiplier. `arb_signal.py` writes capacity columns that model who
+supplies/takes the target shares:
+
+- Holder mix is rolling-estimated from prior disclosed election events using the older structural
+  model. `p_hat` is the noisy/irrational holder cash-election probability; `q_hat` is the
+  rational EV-sensitive holder share of total target ownership. Passive ownership remains the
+  point-in-time WRDS/ETF estimate. The old fixed `positive_holder_share_of_active` is now only a
+  fallback when the rolling structural estimate is unavailable.
+- `ENTER`: buy target shares from noisy, positive, then passive/inactive holders. If long EV is
+  strongly positive, rolling-estimated positive holders are assumed not to sell, so capacity is
+  mostly noisy flow. The model then recomputes aggregate `f_cash` after our own election and
+  reruns proration.
+- `REVERSE`: short target by borrowing from inactive holders and selling to noisy buyers. This
+  may shift market election demand, but it does **not** give us an election right; payoff stays
+  passive blended settlement.
+
+Capacity has three explicit levels:
+
+- `capacity_raw_max_*`: flow/ADV/position-limit capacity before the trade payoff is re-gated.
+- `capacity_max_*`: largest feasible size that still passes the risk gates after our self-impact.
+- `capacity_optimal_*`: feasible size that maximizes expected dollar P&L. The legacy
+  `capacity_notional` aliases point here.
+
+The realized backtest reports two settlement methods. `baseline` accepts the historical election
+result even though sizing considered our impact. `self_impact` shifts completed-state `f_cash` by
+our size and counterparty mix before recomputing proration for the long election trade. Reverse
+baseline and self-impact are intentionally identical under fixed-pool passive blended settlement,
+because the short side has no election right.
 
 ## Results (current, n=73 demand / 32 MC-ready)
 These are the committed/current run artifacts. Rerun `arb_run.py` and `arb_signal.py` after the
 ignored local input CSVs are present to refresh them under the three-state outcome adapter.
 
-- **Demand model:** Beta(0.59, 0.78), mean 43% elect cash; U-shaped (election is near a corner decision).
-- **Calibration backtest ✅:** leave-one-out PIT mean 0.50, ~81% in the 80% band, **KS p=0.96** → the sampled distribution is honest out-of-sample.
+- **Demand model:** Beta(0.59, 0.793), mean 43% elect cash; U-shaped (election is near a corner decision).
+- **Calibration backtest ✅:** leave-one-out PIT mean 0.498, ~80% in the 80% band, **KS p=0.959** → the sampled distribution is honest out-of-sample.
 - **Realized edge:** 100% positive; median ~1.7% of blended (positive is partly guaranteed — the magnitude is the informative part).
-- **Trade blotter:** 31 deals, **22 ENTER**; **signal skill corr(E[return], realized) = +0.67** (predicted return tracks realized).
+- **Trade blotter:** 88 priced signals: **41 ENTER**, **20 REVERSE**, 15 REVIEW, and 12 PASS. Combined trade-book mean expected return is ~8.4%; realized coverage mean is ~6.3% with ~86% positive hit rate. Current covered signal/realized correlation is +0.31.
+- **Capacity / P&L:** all 61 current trade signals have local shares/ADV capacity estimates. Holder mix is rolling structural for 55 trades and default structural for 6 early trades; median fitted depth is 23 prior labels, median `p_hat` is 0.30, median `q_hat` is 0.10, and median positive-holder share of active is ~10%. Median optimal trade capacity is ~$1.1m notional / ~0.52% of target shares. ENTER median is ~$0.5m and mostly source-supply limited; REVERSE median is ~$21m and noisy-buyer-demand limited. Total optimal notional is ~$944.3m, expected P&L is ~$123.2m, historical-election realized P&L is ~$28.5m, and self-impact realized P&L is ~$28.5m on covered trades.
+- **Self-impact proof:** pure noisy-counterparty scaling can theoretically eliminate a long election opportunity by shifting aggregate demand toward the elected side, but not inside the current selected capacities; the only current proof break-even is ~97% of target shares. Reverse self-impact cannot eliminate payoff under the fixed-pool passive blended settlement assumption.
 - **Portfolio MC:** positive proration edge; a completed/terminated/withdrawn scenario opens a downside tail (the tail is deal-outcome, not election, risk).
 - **Spread conditioning:** logit slope ≈ 0 on our data — supported by the framework, MC'd over its uncertainty rather than asserted.
 
@@ -49,12 +83,9 @@ ignored local input CSVs are present to refresh them under the three-state outco
 
 ## Honest scope / what's NOT done yet
 - **Demand distribution is solid and near the ceiling** — no more recoverable from EDGAR (98% of no-label deals already had the 8-K pulled; the number simply isn't disclosed).
-- **Full trade P&L vs entry price** (survivorship-aware) needs one scoped WRDS pull: extend daily
-  prices to each deal's close, and add the all-status universe for completed/terminated/withdrawn
-  outcome probabilities. Figures 1–3 and the calibration result need nothing further.
-- **Terminated/withdrawn probability training is not in the committed artifacts yet.** The trade
-  layer is wired to consume those probabilities once supplied, but defaults are clearly labeled as
-  scenario assumptions.
+- **Full signal layer is wired locally** — event-level completed/terminated/withdrawn probabilities are generated from the Bloomberg `Deal Status` source when the local licensed file is present, and `arb_signal.py` consumes that output explicitly.
+- **Reverse trades are deliberately conservative** — they can short the target when the passive blended settlement is overpriced, but they do not receive an election right or the optimal-election payoff.
+- **Capacity assumptions are partly estimated, partly structural.** Passive ownership and ADV are observed inputs; `p_hat/q_hat` come from rolling prior-event structural fits; sell/buy fractions, passive sale/lending fractions, and borrow availability remain behavioral assumptions. The capacity overlay labels holder source, fit depth, noisy/positive/passive shares, raw maximum, risk-gated maximum, profit-optimal size, and both realized settlement methods in the output columns.
 - `pi_cash` defaults to 0.50 on ~28% of deals where the cap wasn't parseable — flagged in
   `arb_deals.csv` via `pi_cash_source`.
 
