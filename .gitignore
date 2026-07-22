@@ -16,6 +16,11 @@ ma_export_*.csv
 llm_field_results*.jsonl
 llm_field_extractions*.csv
 
+# Secrets — API keys, credentials (NEVER commit; repo is public)
+.env
+.env.*
+*.key
+
 # Python virtual environment
 .venv/
 
@@ -28,3 +33,44 @@ cusip_manual_overrides.csv
 
 # Backfill run logs
 cusip_backfill*.log
+
+# SEC download run dirs (large, regenerable) + CRSP-derived intermediates — keep local
+ma_edgar_test/
+ma_edgar_run/
+ma_edgar_prepare/
+ma_field_locator*/
+ma_ownership*/
+ma_market*/
+ma_model*/
+target_close_dates.csv
+# CIK-resolution audit outputs (regenerable via audit_cik_resolution.py / build_cik_overrides.py)
+cik_resolution_audit.csv
+cik_override_candidates.csv
+ma_edgar_audit_cache/
+# NOTE: cik_manual_overrides.csv is hand-verified config (public CIKs) — intentionally NOT ignored; commit it.
+partials_4.csv
+ma_edgar_partials/
+partials_4.csv
+ma_edgar_full/
+
+# Run logs (regenerable)
+ma_edgar_*.log
+*.log
+validation_results/
+
+# Local backups (deck / data)
+*_backup*.pptx
+*_backup.csv
+
+# Archived / superseded material — kept local, out of the repo
+archive/
+
+# CRSP-price-derived model intermediates — keep local, do NOT commit (repo is public)
+arb_deals.csv
+deadline_spread.csv
+arb_signals.csv
+arb_realized_edge.csv
+eda_output/
+
+# PowerPoint/Office lock files
+~$*

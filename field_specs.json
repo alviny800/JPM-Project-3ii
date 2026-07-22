@@ -112,7 +112,7 @@
     },
     "preliminary_proration_results": {
       "required": true,
-      "description": "Preliminary election results or preliminary proration factor after the election deadline, used as a post-election label only.",
+      "description": "The PRELIMINARY post-proration outcome after the election deadline: a preliminary proration/fill factor and/or preliminary percentage of shares RECEIVING cash vs. stock after allocation. This is a post-proration OUTCOME (what holders got), distinct from election DEMAND (what they chose, in realized_cash/stock_election_demand). Post-election label only.",
       "timing_bucket": "post_election_label",
       "release_timing": "T4 after election deadline and near/after closing; never a trade-entry feature.",
       "document_keys": ["post-deadline 8-K", "EX-99.1 press release", "Form 425 communication"],
@@ -121,7 +121,7 @@
     },
     "final_proration_results": {
       "required": true,
-      "description": "Final election results, realized proration factor, and realized fill-rate label after the deadline.",
+      "description": "The realized POST-PRORATION OUTCOME (distinct from election demand): the final cash proration/fill factor (fraction 0-1 of cash elections honored) and/or the final PERCENTAGE of shares that RECEIVED cash vs. stock AFTER proration, plus any oversubscribed/undersubscribed statement. This is what holders GOT after allocation, not what they chose — the elected DEMAND goes in realized_cash/stock_election_demand. Capture the factor and/or received-percentage as disclosed. A bare completion/effective-time 8-K that only restates the consideration mechanics is NOT the final results filing.",
       "timing_bucket": "post_election_label",
       "release_timing": "T4 after election deadline and near/after closing; never a trade-entry feature.",
       "document_keys": ["post-deadline 8-K", "EX-99.1 press release", "final proration announcement", "Form 425 communication"],
@@ -130,7 +130,7 @@
     },
     "realized_cash_election_demand": {
       "required": false,
-      "description": "Actual number or percentage of shares electing cash, if disclosed in final/proration result filings.",
+      "description": "The PERCENTAGE of shares whose holders AFFIRMATIVELY ELECTED / CHOSE cash consideration at the election deadline, BEFORE any proration or allocation. This is election DEMAND. Report a number on a 0-100 scale; if disclosed as a raw share count, DERIVE the percentage using the shares-outstanding or total-electing base stated in the same filing (basis='derived'). Do NOT report the percentage of shares that RECEIVED, were CONVERTED to, or were ALLOCATED cash AFTER proration — that post-proration OUTCOME belongs in final_proration_results, not here. Language cues: 'elected cash' / 'made a cash election' / 'shares electing cash' = demand (this field); 'converted into cash' / 'received the cash consideration' / 'allocated cash' = allocation (NOT this field). Return null (basis='not_found') if only a dollar amount or only a post-proration outcome is disclosed.",
       "timing_bucket": "post_election_label",
       "release_timing": "T4 after election deadline and near/after closing.",
       "document_keys": ["post-deadline 8-K", "EX-99.1 press release", "final proration announcement"],
@@ -139,7 +139,7 @@
     },
     "realized_stock_election_demand": {
       "required": false,
-      "description": "Actual number or percentage of shares electing stock, if disclosed in final/proration result filings.",
+      "description": "The PERCENTAGE of shares whose holders AFFIRMATIVELY ELECTED / CHOSE stock consideration at the election deadline, BEFORE any proration or allocation. This is election DEMAND. Report a number on a 0-100 scale; if disclosed as a raw share count, DERIVE the percentage using the shares-outstanding or total-electing base in the same filing (basis='derived'). Do NOT report the percentage that RECEIVED / were CONVERTED to / were ALLOCATED stock AFTER proration — that post-proration OUTCOME belongs in final_proration_results. Language cues: 'elected stock' / 'made a stock election' = demand (this field); 'converted into' / 'received' / 'allocated' = allocation (NOT this field). Return null (basis='not_found') if only a post-proration outcome is disclosed.",
       "timing_bucket": "post_election_label",
       "release_timing": "T4 after election deadline and near/after closing.",
       "document_keys": ["post-deadline 8-K", "EX-99.1 press release", "final proration announcement"],

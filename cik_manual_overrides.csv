@@ -1,0 +1,7 @@
+target_name,cik10,resolved_name,target_cusip,evidence,note
+CalAtlantic Group Inc/old,0000878560,"CalAtlantic Group, LLC",128195104,completion 8-K 2018-02-13 at CRSP close 2018-02-12; former Standard Pacific Corp,acquired by Lennar 2018
+C-COR Inc/Old,0000350621,C-COR INC,125010108,own 25-NSE delisting 2007-12-14 at CRSP close 2007-12-14,acquired by Arris 2007
+SureWest Communications/Old,0000943117,SUREWEST COMMUNICATIONS,,own 25-NSE delisting 2012-07-03 near CRSP close; former Roseville Communications,acquired by Consolidated Communications 2012
+Auxilium Pharmaceuticals LLC,0001182129,AUXILIUM PHARMACEUTICALS INC,,completion 8-K 2015-01-29 at close,acquired by Endo 2015; input name renamed to LLC post-merger
+Pope Resources a Delaware LP,0000784011,POPE RESOURCES LTD PARTNERSHIP,,completion 8-K 2020-05-08 near close,acquired by Rayonier 2020
+Slade's Ferry Bancorp,0000857499,SLADES FERRY BANCORP,,own 25-NSE delisting 2008-02-29; former Weetamoe Bancorp,already resolved correctly by efts (score 92.7) - override pins it

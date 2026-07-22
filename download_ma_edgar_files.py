@@ -39,6 +39,7 @@ import argparse
 import datetime as dt
 import hashlib
 import html
+import itertools
 import json
 import os
 import random
@@ -49,7 +50,7 @@ import time
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import urljoin
+from urllib.parse import urljoin, quote
 
 import pandas as pd
 import requests
@@ -261,6 +262,10 @@ Rules:
 - Do not invent dates, ratios, caps, proration factors, deadlines, or default rules.
 - Distinguish pre-election trade-entry fields from post-election realized-label fields.
 - Prefer final prospectus/proxy/election-form documents for trade-entry mechanics. Prefer post-deadline 8-K/press release exhibits for realized proration labels.
+- Realized election-demand labels (realized_cash_election_demand, realized_stock_election_demand, preliminary_proration_results, final_proration_results) are frequently reported NOT as a clean percentage but as: (a) raw share counts electing each option, (b) an aggregate dollar amount of cash paid, or (c) a proration/allocation factor or an "oversubscribed"/"undersubscribed" statement. Capture whichever form is disclosed — do NOT leave the field null when the underlying counts, dollar amounts, or factor are present in the evidence.
+- When the evidence also supplies a base (shares outstanding, total shares electing, or shares deemed outstanding for the election), DERIVE the percentage from the raw counts, put the resulting % in value, show the arithmetic in notes, and set basis='derived'. If only the raw figure is available, report it with basis='direct'.
+- CRITICAL — election DEMAND vs. post-proration OUTCOME. `realized_cash_election_demand` / `realized_stock_election_demand` are the percentage of shares whose holders CHOSE / ELECTED that option at the deadline, BEFORE proration — this is DEMAND. Do NOT place a post-proration allocation there: the percentage of shares that RECEIVED, were CONVERTED to, or were ALLOCATED an option AFTER proration is a different quantity and belongs in `final_proration_results` (with the proration/fill factor). Cues: 'elected' / 'made a cash (stock) election' / 'shares electing' = demand; 'converted into' / 'received the consideration' / 'allocated after proration' = outcome. When a filing reports both (e.g. "~96% elected stock; after the 50/50 proration ~47.9% were converted to cash"), put 96% in `realized_stock_election_demand` and the 47.9% / proration factor in `final_proration_results` — never swap them, and never report the same number for both meanings.
+- A "completion"/"effective time" 8-K that merely states the merger closed and restates the consideration mechanics is NOT a results filing. Look elsewhere in the supplied evidence for the election-results / proration press release before concluding a realized field is absent. Only if no election breakdown is disclosed anywhere in the evidence, set the realized-demand fields to null with basis='not_found' and note that results were not disclosed.
 """
 
 LLM_EXTRACTION_SCHEMA = {
@@ -574,6 +579,111 @@ def fuzzy_match_company(name: str, cik_df: pd.DataFrame, min_score: int = 84) ->
     }
 
 
+SEC_EFTS_URL = "https://efts.sec.gov/LATEST/search-index"
+_EFTS_CACHE: Dict[str, Dict[str, Any]] = {}
+
+# Hand-verified name -> CIK map for the recoverable resolver tail (delisted micro-caps
+# and renamed targets that efts/company_tickers miss or match to the wrong entity).
+# Keyed by normalize_name(target_name). Populated by load_cik_overrides().
+_CIK_OVERRIDES: Dict[str, Dict[str, Any]] = {}
+
+
+def load_cik_overrides(path: Path) -> int:
+    """Load a hand-verified target-name -> CIK override table (see cik_manual_overrides.csv).
+
+    Each override is trusted absolutely (match_method='manual_override', score=100) and
+    consulted BEFORE efts/company_tickers, so a verified CIK can't be re-broken by fuzzy
+    matching. Returns the number of overrides loaded."""
+    if not path or not Path(path).exists():
+        return 0
+    df = pd.read_csv(path, dtype=str, keep_default_na=False)
+    for _, r in df.iterrows():
+        name = str(r.get("target_name", "")).strip()
+        cik10 = str(r.get("cik10", "")).strip()
+        if not name or not cik10:
+            continue
+        cik10 = cik10.zfill(10)
+        _CIK_OVERRIDES[normalize_name(name)] = {
+            "query_name": name, "query_norm": normalize_name(name),
+            "matched": True, "score": 100.0,
+            "cik_int": int(cik10), "cik10": cik10,
+            "ticker": "", "sec_title": str(r.get("resolved_name", "")),
+            "match_method": "manual_override",
+        }
+    return len(_CIK_OVERRIDES)
+
+
+def override_match(name: str) -> Optional[Dict[str, Any]]:
+    """Return a copy of the manual override for `name`, or None."""
+    hit = _CIK_OVERRIDES.get(normalize_name(name))
+    return dict(hit) if hit else None
+
+
+def resolve_cik_via_efts(client: SecClient, name: str, min_score: int = 84) -> Dict[str, Any]:
+    """Resolve a company name to a SEC CIK via EDGAR full-text search (efts).
+
+    company_tickers.json lists only CURRENT registrants, so it misses the ~96% of
+    merger targets that are delisted post-acquisition. efts indexes filing text back to
+    2001 (our universe is 2006+), so a delisted target's own proxies/8-Ks still resolve.
+    We collect the filer entities of filings matching the name and pick the entity whose
+    own name best matches the query (guards against ticker/name reuse and co-filers like
+    the acquirer or institutional 13G holders)."""
+    norm = normalize_name(name)
+    base = {"query_name": name, "query_norm": norm, "matched": False, "score": 0, "match_method": "efts"}
+    if not norm:
+        return base
+    if name in _EFTS_CACHE:
+        return dict(_EFTS_CACHE[name])
+    try:
+        # NOTE: use a plain request with only the UA — do NOT reuse client.session, which
+        # hardcodes Host: www.sec.gov and makes efts.sec.gov return a non-JSON error page.
+        ua = client.session.headers.get("User-Agent", "")
+        time.sleep(getattr(client, "sleep_seconds", 0.13))
+        r = requests.get(
+            SEC_EFTS_URL + '?q=%22' + quote(name) + '%22',
+            headers={"User-Agent": ua, "Accept-Encoding": "gzip, deflate"},
+            timeout=30,
+        )
+        r.raise_for_status()
+        hits = r.json().get("hits", {}).get("hits", [])
+    except Exception:
+        return base
+
+    cand: Dict[str, Dict[str, Any]] = {}
+    for h in hits:
+        for dn in h.get("_source", {}).get("display_names", []):
+            m = re.search(r"\(CIK (\d{10})\)", dn)
+            if not m:
+                continue
+            cik10 = m.group(1)
+            disp = dn.split("  (")[0].strip()
+            tm = re.search(r"\(([A-Z][A-Z0-9.\-]{0,6})\)\s*\(CIK", dn)
+            e = cand.setdefault(cik10, {"name": disp, "ticker": tm.group(1) if tm else "", "freq": 0})
+            e["freq"] += 1
+    if not cand:
+        _EFTS_CACHE[name] = base
+        return dict(base)
+
+    best_cik, best_score = None, -1.0
+    for cik10, e in cand.items():
+        cand_norm = normalize_name(e["name"])
+        if HAS_RAPIDFUZZ:
+            s = float(fuzz.token_set_ratio(norm, cand_norm))
+        else:
+            s = difflib.SequenceMatcher(None, norm, cand_norm).ratio() * 100.0
+        if s > best_score:
+            best_cik, best_score = cik10, s
+    e = cand[best_cik]
+    out = {
+        "query_name": name, "query_norm": norm,
+        "matched": bool(best_score >= min_score), "score": float(round(best_score, 1)),
+        "cik_int": int(best_cik), "cik10": best_cik,
+        "ticker": e["ticker"], "sec_title": e["name"], "match_method": "efts",
+    }
+    _EFTS_CACHE[name] = out
+    return dict(out)
+
+
 def flatten_submissions(sub: Dict[str, Any], client: SecClient) -> pd.DataFrame:
     """
     Convert SEC submissions JSON into a dataframe.
@@ -738,6 +848,21 @@ def preferred_form_score(form: str, document_name: str, preferred_forms: List[st
     return score
 
 
+# Strong "realized RESULTS" signal phrases — their presence means a document REPORTS
+# election outcomes (share counts / proration / oversubscription), as opposed to merely
+# describing the election mechanics ex-ante or announcing that the merger became effective.
+# Used to lift a genuine election-results press release above a bare "completion" 8-K when
+# both file at close and would otherwise tie on the form bonus alone (TFCF/NYSE/Andeavor).
+RESULTS_SIGNAL_PHRASES = [
+    "elected to receive cash", "elected to receive stock", "elected to receive the cash stock",
+    "shares elected", "were prorated", "was prorated", "prorated at", "proration factor",
+    "allocation factor", "oversubscribed", "undersubscribed", "election results",
+    "results of the election", "final proration", "preliminary proration",
+    "cash elections", "stock elections", "percent elected", "% elected",
+    "cash election shares", "stock election shares", "shares electing",
+]
+
+
 def score_field_text(
     text: str,
     form: str,
@@ -763,7 +888,24 @@ def score_field_text(
             # Multi-word exact economic terms get heavier weight.
             keyword_score += c * (4 if len(kw.split()) >= 2 else 1)
     form_bonus = preferred_form_score(form, document_name, list(spec.get("preferred_forms", [])))
-    field_score = keyword_score + (form_bonus if keyword_score > 0 else 0)
+    # Realized-results ("post_election_label") fields live in announcement forms (8-K/
+    # EX-99/425) that present results as numeric tables with SPARSE keyword matches — a
+    # keyword-dense S-4 that merely *describes* the election mechanics would otherwise
+    # out-score the actual results 8-K. For these fields, let the form/announcement bonus
+    # carry a candidate even with zero keyword hits so the results filing surfaces.
+    is_label = str(spec.get("timing_bucket", "")) == "post_election_label"
+    # Results-signal bonus: for realized-label fields, reward documents that actually REPORT
+    # outcomes so a results press release beats a same-day bare completion 8-K. Capped so it
+    # augments — never dominates — the keyword/form signal.
+    results_bonus = 0
+    if is_label:
+        sig = 0
+        for ph in RESULTS_SIGNAL_PHRASES:
+            parts = [re.escape(p) for p in ph.lower().replace("-", " ").split()]
+            if parts and re.search(r"[\s\-]+".join(parts), lowered):
+                sig += 1
+        results_bonus = min(sig, 5) * 6
+    field_score = keyword_score + (form_bonus if (keyword_score > 0 or is_label) else 0) + results_bonus
     snippet = make_snippets(text, hits or keywords, max_snips=4, window=380)
     return field_score, hits, counts, snippet, form_bonus
 
@@ -783,6 +925,12 @@ def field_locator_rows_for_doc(
             spec=spec,
         )
         if field_score < min_field_score:
+            continue
+        # Realized-results fields must come from post-close announcement forms, never a
+        # pre-close registration/proxy (S-4, 424B*, DEF 14A). Those score form_bonus==0
+        # against the label fields' preferred forms (8-K/8-K-A/425/EX-99), so gate on it —
+        # this removes the logically-impossible "2018 S-4 as evidence for 2019 results" case.
+        if str(spec.get("timing_bucket", "")) == "post_election_label" and form_bonus == 0:
             continue
         rows.append(FieldLocatorRow(
             event_id=manifest_row.event_id,
@@ -817,16 +965,112 @@ def field_locator_rows_for_doc(
     return rows
 
 
-def trim_field_locator(locator_df: pd.DataFrame, top_k: int) -> pd.DataFrame:
+def estimate_close_date(manifest_rows: List["ManifestRow"]) -> Optional[pd.Timestamp]:
+    """Infer the deal's close date ≈ the TARGET company's last SEC filing.
+
+    The input CSV has no close date, but a merger target deregisters (Form 15) and goes
+    dark within days of closing, so the latest target-side filing is a reliable close
+    proxy — computed purely from filings we already downloaded, no extra data. Used to
+    anchor realized-results evidence selection (the results 8-K is filed at close, so it
+    beats both unrelated later 8-Ks and the keyword-heavy pre-close proxies)."""
+    dts = [
+        pd.to_datetime(getattr(r, "filing_date", None), errors="coerce")
+        for r in manifest_rows
+        if str(getattr(r, "side", "")).lower() == "target"
+    ]
+    dts = [d for d in dts if pd.notna(d)]
+    return max(dts) if dts else None
+
+
+def _cusip8(v: Any) -> str:
+    return re.sub(r"[^0-9A-Za-z]", "", str(v or "")).upper()[:8]
+
+
+def load_close_dates(path: Optional[str]) -> Dict[str, pd.Timestamp]:
+    """Load authoritative deal-close dates (CRSP delisting) keyed by 8-char target CUSIP.
+
+    Produced by build_close_dates.py from the target CUSIP + CRSP stocknames nameenddt.
+    This is the reliable close anchor; estimate_close_date() is the fallback when a
+    target has no CRSP coverage (foreign CINS / OTC)."""
+    if not path or not Path(path).exists():
+        return {}
+    df = pd.read_csv(path, dtype=str, keep_default_na=False)
+    out: Dict[str, pd.Timestamp] = {}
+    for _, r in df.iterrows():
+        c8 = _cusip8(r.get("target_cusip8") or r.get("target_cusip"))
+        d = pd.to_datetime(r.get("close_date", ""), errors="coerce")
+        if c8 and pd.notna(d):
+            out[c8] = d
+    return out
+
+
+def _close_proximity_bonus(days_from_close: Optional[float]) -> int:
+    """Boost for a realized-results filing near the inferred close date."""
+    if days_from_close is None:
+        return 0
+    d = abs(days_from_close)
+    if d <= 45:
+        return 25
+    if d <= 120:
+        return 10
+    if d <= 270:
+        return 3
+    return 0
+
+
+def trim_field_locator(
+    locator_df: pd.DataFrame,
+    top_k: int,
+    close_est_by_event: Optional[Dict[str, pd.Timestamp]] = None,
+) -> pd.DataFrame:
     if locator_df.empty or top_k <= 0:
         return locator_df
-    out = (
-        locator_df.sort_values(["event_id", "field_name", "field_score", "filing_date"], ascending=[True, True, False, True])
-        .groupby(["event_id", "field_name"], dropna=False)
-        .head(top_k)
-        .reset_index(drop=True)
+    df = locator_df.copy()
+    df["_fdate"] = pd.to_datetime(df["filing_date"], errors="coerce")
+    is_label = df["timing_bucket"].astype(str) == "post_election_label"
+
+    # Timing gate (needs a reliable close date): a realized-results field cannot be
+    # satisfied by a filing made well BEFORE close — the results don't exist yet. This
+    # drops the deal-ANNOUNCEMENT 8-K/425 (right form, describes the election mechanics,
+    # high keyword score, but filed months pre-close) which otherwise out-scores the terse
+    # results 8-K. Only gate when we actually know close (CRSP); otherwise leave as-is.
+    if close_est_by_event:
+        PRE_CLOSE_BUFFER = 30  # results are announced around close; allow a small lead
+        drop = pd.Series(False, index=df.index)
+        for i in df.index[is_label]:
+            ce = close_est_by_event.get(str(df.at[i, "event_id"]))
+            fd = df.at[i, "_fdate"]
+            if ce is not None and pd.notna(fd) and (ce - fd).days > PRE_CLOSE_BUFFER:
+                drop.at[i] = True
+        if drop.any():
+            df = df[~drop]
+            is_label = df["timing_bucket"].astype(str) == "post_election_label"
+
+    # Close-date anchor: for realized-results fields, add a proximity-to-close bonus so the
+    # results announcement (filed at close) outranks unrelated later 8-Ks (earnings) and
+    # keyword-heavy pre-close proxies. Keyword score stays primary; proximity is the booster.
+    prox = pd.Series(0, index=df.index, dtype=int)
+    if close_est_by_event:
+        for i in df.index[is_label]:
+            ce = close_est_by_event.get(str(df.at[i, "event_id"]))
+            fd = df.at[i, "_fdate"]
+            if ce is not None and pd.notna(fd):
+                prox.at[i] = _close_proximity_bonus((fd - ce).days)
+    df["_eff"] = df["field_score"] + prox
+
+    parts = []
+    # Label fields: rank by (score + proximity), latest-first among ties.
+    lab = df[is_label].sort_values(
+        ["event_id", "field_name", "_eff", "_fdate"], ascending=[True, True, False, False]
     )
-    return out
+    # Pre-close term fields: rank by score, earliest authoritative filing among ties.
+    oth = df[~is_label].sort_values(
+        ["event_id", "field_name", "field_score", "_fdate"], ascending=[True, True, False, True]
+    )
+    for sub in (lab, oth):
+        if not sub.empty:
+            parts.append(sub.groupby(["event_id", "field_name"], dropna=False).head(top_k))
+    return pd.concat(parts).drop(columns=["_fdate", "_eff"]).reset_index(drop=True)
 
 
 def build_event_field_coverage(
@@ -938,7 +1182,20 @@ def build_selected_upload_docs(locator_df: pd.DataFrame, max_docs_per_event: int
         .sort_values(["event_id", "total_field_score", "max_field_score"], ascending=[True, False, False])
     )
     if max_docs_per_event > 0:
-        grouped = grouped.groupby("event_id", dropna=False).head(max_docs_per_event).reset_index(drop=True)
+        # Reserve slots for realized-results evidence. Ranking purely by total_field_score
+        # lets the term-heavy proxy (S-4/424B matches ~all term fields) consume every slot
+        # and crowd out the sparse-keyword results 8-K — which serves only the 2-3 label
+        # fields. Guarantee the top few label-evidence docs survive, then fill by score.
+        reserve = min(3, max_docs_per_event)
+        grouped["_is_label"] = grouped["timing_buckets"].astype(str).str.contains("post_election_label", na=False)
+        parts = []
+        for _ev, g in grouped.groupby("event_id", dropna=False):
+            lab = g[g["_is_label"]].sort_values(["max_field_score", "total_field_score"], ascending=False).head(reserve)
+            rest = g[~g.index.isin(lab.index)]
+            keep = pd.concat([lab, rest]).head(max_docs_per_event)
+            # restore the total-score ordering for the surviving set
+            parts.append(keep.sort_values(["total_field_score", "max_field_score"], ascending=False))
+        grouped = pd.concat(parts).drop(columns=["_is_label"]).reset_index(drop=True)
     return grouped
 
 
@@ -1130,7 +1387,8 @@ def anthropic_messages_payload(llm_payload: Dict[str, Any], model: str, max_toke
     return {
         "model": model,
         "max_tokens": max_tokens,
-        "temperature": 0,
+        # NOTE: temperature is intentionally omitted — Opus 4.8 / Sonnet 5 reject
+        # sampling params (400). Extraction determinism is handled via prompting.
         "system": llm_payload["system_prompt"],
         "messages": [
             {
@@ -1178,6 +1436,147 @@ def call_anthropic(llm_payload: Dict[str, Any], api_key: str, model: str, max_to
         "response": data,
         "parsed": parsed,
     }
+
+
+# (input, output) USD per 1M tokens. The Message Batches API applies a further -50%.
+MODEL_PRICES_USD_PER_MTOK = {
+    "claude-opus-4-8": (5.0, 25.0),
+    "claude-opus-4-7": (5.0, 25.0),
+    "claude-opus-4-6": (5.0, 25.0),
+    "claude-sonnet-5": (2.0, 10.0),   # intro pricing through 2026-08-31
+    "claude-sonnet-4-6": (3.0, 15.0),
+    "claude-haiku-4-5": (1.0, 5.0),
+}
+
+
+def _parse_anthropic_message(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Extract the JSON object from a Messages API response body (same logic as call_anthropic)."""
+    text_blocks = [b.get("text", "") for b in data.get("content", []) if b.get("type") == "text"]
+    text = "\n".join(text_blocks).strip()
+    try:
+        return json.loads(text)
+    except Exception:
+        start, end = text.find("{"), text.rfind("}")
+        if start >= 0 and end > start:
+            try:
+                return json.loads(text[start:end + 1])
+            except Exception:
+                pass
+    return {"parse_error": True, "raw_text": text, "stop_reason": data.get("stop_reason", "")}
+
+
+def estimate_batch_cost(payloads: List[Dict[str, Any]], model: str, max_tokens: int) -> Tuple[float, int, int]:
+    """Rough pre-flight cost (USD, est_input_tok, est_output_tok) for a batch, incl. the -50% batch discount.
+    Output is planned at ~9k tok/deal (observed 8-11k); input from payload chars/4."""
+    pin, pout = MODEL_PRICES_USD_PER_MTOK.get(model, (5.0, 25.0))
+    tin = tout = 0.0
+    # SEC filing text tokenizes denser than prose: the 12-deal Sonnet-5 run measured
+    # ~256K real input tokens against ~792K payload chars/deal => ~3.05 chars/token. Use 3.0
+    # (a touch conservative) so this pre-flight never UNDER-estimates the cost cap.
+    for p in payloads:
+        body = json.dumps({k: v for k, v in p.items() if k != "system_prompt"}, ensure_ascii=False)
+        tin += (len(body) + len(str(p.get("system_prompt", "")))) / 3.0
+        tout += min(max_tokens, 9000)
+    cost = (tin * pin / 1e6 + tout * pout / 1e6) * 0.5
+    return cost, int(tin), int(tout)
+
+
+def run_anthropic_batch(
+    payloads: List[Dict[str, Any]],
+    api_key: str,
+    model: str,
+    max_tokens: int,
+    max_cost_usd: Optional[float] = None,
+    poll_seconds: int = 30,
+    max_wait_seconds: int = 86400,
+) -> List[Dict[str, Any]]:
+    """Submit all field payloads as ONE Message Batch (-50% vs sync), poll to completion, and
+    return records in the same shape call_anthropic produces so flatten_llm_records just works.
+
+    A hard cost cap (max_cost_usd) is enforced BEFORE submission: if the pre-flight estimate
+    exceeds it, we abort without spending — raise the cap or cut --max-events."""
+    if not api_key:
+        raise ValueError("Anthropic API key is required for --llm-stage batch.")
+    proj, est_in, est_out = estimate_batch_cost(payloads, model, max_tokens)
+    print(f"[batch] {len(payloads)} requests; est input ~{est_in:,} tok / output ~{est_out:,} tok; "
+          f"projected batch cost ~${proj:.2f}")
+    if max_cost_usd is not None and proj > max_cost_usd:
+        raise SystemExit(
+            f"[batch] ABORT (no spend): projected ${proj:.2f} exceeds --max-batch-cost-usd ${max_cost_usd:.2f}. "
+            f"Raise --max-batch-cost-usd or lower --max-events. Payloads are cached; re-running is free until submit."
+        )
+
+    headers = {"x-api-key": api_key, "anthropic-version": "2023-06-01", "content-type": "application/json"}
+    order: Dict[str, Dict[str, Any]] = {}
+    requests_body: List[Dict[str, Any]] = []
+    for i, p in enumerate(payloads):
+        cid = f"evt-{i:05d}"
+        order[cid] = p
+        requests_body.append({"custom_id": cid, "params": anthropic_messages_payload(p, model=model, max_tokens=max_tokens)})
+
+    def _post_with_retry(url: str, body: Dict[str, Any], tries: int = 5) -> Dict[str, Any]:
+        last = None
+        for attempt in range(tries):
+            try:
+                r = requests.post(url, headers=headers, data=json.dumps(body), timeout=120)
+                if r.status_code in (429, 500, 502, 503, 529):
+                    raise RuntimeError(f"HTTP {r.status_code}: {r.text[:200]}")
+                r.raise_for_status()
+                return r.json()
+            except Exception as e:
+                last = e
+                wait = min(60, (2 ** attempt)) + random.uniform(0, 1)
+                print(f"[batch] submit retry {attempt+1}/{tries} after error: {e}; sleeping {wait:.1f}s", file=sys.stderr)
+                time.sleep(wait)
+        raise RuntimeError(f"[batch] submit failed after {tries} tries: {last}")
+
+    created = _post_with_retry("https://api.anthropic.com/v1/messages/batches", {"requests": requests_body})
+    batch_id = created.get("id")
+    print(f"[batch] submitted batch {batch_id}; polling every {poll_seconds}s (up to {max_wait_seconds//3600}h)...")
+
+    waited = 0
+    results_url = None
+    while waited < max_wait_seconds:
+        try:
+            st = requests.get(f"https://api.anthropic.com/v1/messages/batches/{batch_id}", headers=headers, timeout=60).json()
+        except Exception as e:
+            print(f"[batch] poll error (will retry): {e}", file=sys.stderr)
+            time.sleep(poll_seconds); waited += poll_seconds; continue
+        status = st.get("processing_status")
+        counts = st.get("request_counts", {})
+        print(f"[batch] {now_utc()} status={status} counts={counts}")
+        if status == "ended":
+            results_url = st.get("results_url")
+            break
+        time.sleep(poll_seconds); waited += poll_seconds
+    if results_url is None:
+        raise RuntimeError(f"[batch] batch {batch_id} did not finish within {max_wait_seconds}s")
+
+    # Stream JSONL results; each line: {custom_id, result: {type, message?, error?}}
+    rr = requests.get(results_url, headers=headers, timeout=300)
+    rr.raise_for_status()
+    records: List[Dict[str, Any]] = []
+    n_ok = n_err = 0
+    for line in rr.text.splitlines():
+        if not line.strip():
+            continue
+        obj = json.loads(line)
+        cid = obj.get("custom_id", "")
+        payload = order.get(cid, {})
+        res = obj.get("result", {})
+        if res.get("type") == "succeeded":
+            data = res.get("message", {})
+            parsed = _parse_anthropic_message(data)
+            n_ok += 1
+        else:
+            data = {"batch_result_type": res.get("type"), "error": res.get("error")}
+            parsed = {"parse_error": True, "batch_error": res.get("error"), "result_type": res.get("type")}
+            n_err += 1
+        records.append({"provider": "anthropic", "model": model, "custom_id": cid,
+                        "request": {"event_id": payload.get("event", {}).get("event_id", "")},
+                        "response": data, "parsed": parsed})
+    print(f"[batch] collected {len(records)} results: {n_ok} succeeded, {n_err} errored")
+    return records
 
 
 def field_value(x: Any, *path: str) -> Any:
@@ -1430,7 +1829,13 @@ def process_event(
         fdf = filings.loc[mask].sort_values("filingDate").copy()
 
         if max_docs_per_event_side and len(fdf) > max_docs_per_event_side:
-            fdf = fdf.head(max_docs_per_event_side)
+            # STRATIFY, don't just take the earliest N. The deal proxy (terms) sits near
+            # the announcement (start of window) but the election-RESULTS 8-K sits at close
+            # (later in the window). Taking only the earliest N — when a target files
+            # heavily around announcement (e.g. VMware) — truncates before close and the
+            # results filing is never retrieved. Keep the earliest half AND the latest half.
+            half = max_docs_per_event_side // 2
+            fdf = pd.concat([fdf.head(half), fdf.tail(max_docs_per_event_side - half)]).drop_duplicates()
 
         for _, f in fdf.iterrows():
             form = str(f.get("form", ""))
@@ -1582,8 +1987,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--pre-days", type=int, default=60, help="Days before announcement to include.")
     p.add_argument("--post-days", type=int, default=730, help="Days after announcement to include.")
     p.add_argument("--min-name-score", type=int, default=84, help="Minimum fuzzy score for CIK matching.")
+    p.add_argument("--cik-overrides", default="cik_manual_overrides.csv", help="Optional CSV (target_name, cik10, ...) of hand-verified CIKs for the recoverable resolver tail (delisted/renamed targets). Consulted before efts/company_tickers. Build/verify with build_cik_overrides.py.")
+    p.add_argument("--close-dates", default=None, help="Optional CSV (target_cusip8/target_cusip, close_date) of authoritative CRSP delisting/close dates; anchors realized-results evidence. Build with build_close_dates.py.")
     p.add_argument("--max-events", type=int, default=None, help="Limit events for testing.")
-    p.add_argument("--max-docs-per-event-side", type=int, default=40, help="Cap filings per event-side after filtering.")
+    p.add_argument("--start-event", type=int, default=0, help="Skip events whose orig_row_idx (the E###### number) is below this. Use on a --resume run to jump straight to remaining deals instead of re-scanning already-downloaded ones. Set it a few below the highest downloaded event to re-verify the boundary deal.")
+    p.add_argument("--only-event-idx", default=None, help="Comma-separated orig_row_idx values (E###### numbers) to process EXCLUSIVELY. Reuses cached downloads for a targeted re-extraction of specific deals.")
+    p.add_argument("--max-docs-per-event-side", type=int, default=60, help="Cap filings per event-side after filtering (stratified: earliest + latest, so both the announcement proxy and the close-date results filing survive).")
     p.add_argument("--download-exhibits", action="store_true", help="Also download filing-folder text/html/pdf exhibits.")
     p.add_argument("--no-save-documents", action="store_true",
                    help="Fetch SEC documents for scoring/LLM payloads but do not save document files locally.")
@@ -1591,8 +2000,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--resume", action="store_true", default=True, help="Skip already downloaded files.")
     p.add_argument("--sleep-seconds", type=float, default=0.13, help="Delay between SEC requests. Keep >=0.11.")
     p.add_argument("--cache-dir", default=None, help="Optional JSON cache directory.")
-    p.add_argument("--llm-stage", choices=["off", "prepare", "send"], default="off",
-                   help="off: no LLM work; prepare: write per-event JSONL payloads only; send: call provider and aggregate responses.")
+    p.add_argument("--llm-stage", choices=["off", "prepare", "send", "batch"], default="off",
+                   help="off: no LLM work; prepare: write per-event JSONL payloads only; send: call provider synchronously per deal; batch: submit ALL deals as one Message Batch (half-price, async).")
+    p.add_argument("--max-batch-cost-usd", type=float, default=75.0,
+                   help="Hard pre-flight cost ceiling for --llm-stage batch. If the estimate exceeds this, abort BEFORE submitting (no spend).")
+    p.add_argument("--batch-poll-seconds", type=int, default=30, help="Polling interval while waiting for the Message Batch to finish.")
     p.add_argument("--llm-provider", choices=["anthropic"], default="anthropic",
                    help="LLM provider used when --llm-stage send.")
     p.add_argument("--llm-model", default="claude-sonnet-4-6", help="Claude/LLM model name.")
@@ -1665,12 +2077,29 @@ def main() -> None:
     if args.max_events:
         udf = udf.head(args.max_events)
 
+    if args.start_event:
+        before = len(udf)
+        udf = udf[udf["orig_row_idx"].astype(int) >= int(args.start_event)]
+        print(f"[{now_utc()}] --start-event {args.start_event}: skipping {before - len(udf)} already-processed "
+              f"events; only events with orig_row_idx >= {args.start_event} are (re)processed. This makes a resume "
+              f"jump straight to remaining deals instead of re-scanning downloaded ones.")
+
+    if args.only_event_idx:
+        ids = {int(x) for x in str(args.only_event_idx).split(",") if x.strip() != ""}
+        before = len(udf)
+        udf = udf[udf["orig_row_idx"].astype(int).isin(ids)]
+        print(f"[{now_utc()}] --only-event-idx: processing only {len(udf)}/{before} events "
+              f"(orig_row_idx in {sorted(ids)}); reuses cached downloads for a targeted re-extraction.")
+
     print(f"[{now_utc()}] Candidate events after filters: {len(udf):,}")
     out_dir.joinpath("candidate_events.csv").write_text(udf.to_csv(index=False), encoding="utf-8")
 
     client = SecClient(user_agent=args.user_agent, sleep_seconds=args.sleep_seconds, cache_dir=cache_dir)
     cik_df = load_company_tickers(client, out_dir / "_cache" / "company_tickers.json")
     print(f"[{now_utc()}] Loaded SEC company tickers: {len(cik_df):,}")
+    n_ovr = load_cik_overrides(Path(args.cik_overrides)) if args.cik_overrides else 0
+    if n_ovr:
+        print(f"[{now_utc()}] Loaded {n_ovr} hand-verified CIK overrides from {args.cik_overrides}")
 
     # Map names to CIK.
     match_rows: List[Dict[str, Any]] = []
@@ -1680,7 +2109,26 @@ def main() -> None:
         event_idx = int(event["orig_row_idx"])
         for side, col in [("target", "Target Name"), ("acquirer", "Acquirer Name")]:
             name = str(event.get(col, "")).strip()
-            m = fuzzy_match_company(name, cik_df, min_score=args.min_name_score)
+            # Hand-verified overrides win outright (recoverable delisted/renamed targets).
+            # Otherwise: EDGAR full-text search (resolves delisted merger targets), then
+            # fall back to the current-registrant company_tickers.json only if efts misses.
+            m = override_match(name)
+            if m is not None:
+                m.update({"side": side})
+                match_rows.append({**m,
+                                   "event_idx": event_idx, "side": side,
+                                   "target_name": str(event.get("Target Name", "")),
+                                   "acquirer_name": str(event.get("Acquirer Name", "")),
+                                   "announce_date": str(event.get("Announce Date", "")),
+                                   "payment_type": str(event.get("Payment Type", "")),
+                                   "deal_status": str(event.get("Deal Status", ""))})
+                cik_matches[f"{event_idx}:{side}"] = match_rows[-1]
+                continue
+            m = resolve_cik_via_efts(client, name, min_score=args.min_name_score)
+            if not m.get("matched"):
+                m_ticker = fuzzy_match_company(name, cik_df, min_score=args.min_name_score)
+                if m_ticker.get("matched") or float(m_ticker.get("score", 0) or 0) > float(m.get("score", 0) or 0):
+                    m = m_ticker
             m.update({
                 "event_idx": event_idx,
                 "side": side,
@@ -1705,8 +2153,12 @@ def main() -> None:
     all_field_locator_rows: List[FieldLocatorRow] = []
     llm_payloads: List[Dict[str, Any]] = []
     llm_results: List[Dict[str, Any]] = []
+    close_dates8 = load_close_dates(args.close_dates)
+    if close_dates8:
+        print(f"[{now_utc()}] Loaded {len(close_dates8):,} CRSP close dates for the realized-results anchor")
+    all_close_by_event: Dict[str, pd.Timestamp] = {}
     save_documents = not args.no_save_documents
-    collect_llm_documents = args.llm_stage in {"prepare", "send"}
+    collect_llm_documents = args.llm_stage in {"prepare", "send", "batch"}
     if args.llm_stage != "off":
         print(f"[{now_utc()}] LLM stage: {args.llm_stage}; save_documents={save_documents}")
 
@@ -1743,7 +2195,17 @@ def main() -> None:
             if collect_llm_documents and rows and result.field_locator_rows:
                 event_locator_df = pd.DataFrame([asdict(r) for r in result.field_locator_rows])
                 event_locator_df["field_score"] = pd.to_numeric(event_locator_df["field_score"], errors="coerce").fillna(0).astype(int)
-                event_locator_df = trim_field_locator(event_locator_df, top_k=args.field_locator_top_k)
+                event_close = None
+                if rows:
+                    eid = str(rows[0].event_id)
+                    # Authoritative CRSP close date keyed by target CUSIP; fall back to the
+                    # target's-last-filing estimate when the target has no CRSP coverage.
+                    ec = close_dates8.get(_cusip8(event.get("Target cusip"))) if close_dates8 else None
+                    if ec is None:
+                        ec = estimate_close_date(rows)
+                    event_close = {eid: ec}
+                    all_close_by_event[eid] = ec
+                event_locator_df = trim_field_locator(event_locator_df, top_k=args.field_locator_top_k, close_est_by_event=event_close)
                 event_selected_docs_df = build_selected_upload_docs(event_locator_df, max_docs_per_event=args.claude_package_max_docs_per_event)
                 event_payloads = build_claude_field_payloads(
                     event_locator_df,
@@ -1788,7 +2250,13 @@ def main() -> None:
     if all_field_locator_rows:
         field_locator_df = pd.DataFrame([asdict(r) for r in all_field_locator_rows])
         field_locator_df["field_score"] = pd.to_numeric(field_locator_df["field_score"], errors="coerce").fillna(0).astype(int)
-        field_locator_df = trim_field_locator(field_locator_df, top_k=args.field_locator_top_k)
+        # Reuse the per-event close dates already resolved during processing (CRSP where
+        # available, filing-based estimate otherwise); backfill any gaps from the manifest.
+        close_by_event: Dict[str, pd.Timestamp] = dict(all_close_by_event)
+        for _eid, _rs in itertools.groupby(sorted(all_manifest, key=lambda r: r.event_id), key=lambda r: r.event_id):
+            if str(_eid) not in close_by_event or close_by_event[str(_eid)] is None:
+                close_by_event[str(_eid)] = estimate_close_date(list(_rs))
+        field_locator_df = trim_field_locator(field_locator_df, top_k=args.field_locator_top_k, close_est_by_event=close_by_event)
         field_locator_path = out_dir / "field_locator.csv"
         field_locator_df.to_csv(field_locator_path, index=False)
         print(f"[{now_utc()}] Wrote field locator: {field_locator_path} ({len(field_locator_df):,} rows)")
@@ -1821,6 +2289,14 @@ def main() -> None:
         llm_payload_path = out_dir / "llm_field_payloads.jsonl"
         write_jsonl(llm_payload_path, llm_payloads)
         print(f"[{now_utc()}] Wrote LLM payloads: {llm_payload_path}")
+
+    # Batch stage: all payloads are built and downloads are done — submit ONE Message Batch.
+    if args.llm_stage == "batch" and llm_payloads:
+        api_key = args.anthropic_api_key or os.environ.get("ANTHROPIC_API_KEY", "")
+        llm_results = run_anthropic_batch(
+            llm_payloads, api_key=api_key, model=args.llm_model, max_tokens=args.llm_max_tokens,
+            max_cost_usd=args.max_batch_cost_usd, poll_seconds=args.batch_poll_seconds,
+        )
 
     if llm_results:
         llm_results_path = out_dir / "llm_field_results.jsonl"
