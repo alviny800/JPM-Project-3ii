@@ -477,7 +477,7 @@ def write_summary(out_dir: Path, coverage: pd.DataFrame, preds: pd.DataFrame) ->
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Build election model panel, coverage report, and v1 strategy signal.")
+    p = argparse.ArgumentParser(description="Build election model panel, coverage report, and risk-aware strategy signal.")
     p.add_argument("--events", required=True, help="candidate_events.csv")
     p.add_argument("--llm-extractions", required=True, help="llm_field_extractions.csv")
     p.add_argument("--ownership-mix", required=True, help="ownership_mix_by_event.csv")
@@ -491,7 +491,22 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--passive-default-propensity", type=float, default=0.90)
     p.add_argument("--passive-unknown-favored-propensity", type=float, default=0.50)
     p.add_argument("--trading-cost-bps", type=float, default=10.0)
+    p.add_argument("--acquirer-trading-cost-bps", type=float, default=None,
+                   help="Trading-cost bps for the acquirer short leg. Defaults to --trading-cost-bps.")
+    p.add_argument("--use-bid-ask-costs", dest="use_bid_ask_costs", action="store_true", default=True,
+                   help="Add available CRSP bid-ask spread proxies to target/acquirer transaction costs.")
+    p.add_argument("--no-bid-ask-costs", dest="use_bid_ask_costs", action="store_false",
+                   help="Ignore bid-ask spread proxies and use only bps trading-cost assumptions.")
+    p.add_argument("--annual-borrow-cost-bps", type=float, default=0.0,
+                   help="Annualized borrow cost for the acquirer short leg.")
     p.add_argument("--min-net-alpha", type=float, default=0.0)
+    p.add_argument("--min-p05-net-alpha", type=float, default=-1e18,
+                   help="Optional Monte Carlo p5 net-alpha floor per target share.")
+    p.add_argument("--max-loss-probability", type=float, default=1.0,
+                   help="Optional Monte Carlo probability-of-loss ceiling.")
+    p.add_argument("--trade-decision-metric", choices=["mean", "p05", "cvar05", "deterministic"],
+                   default="mean",
+                   help="Risk metric used to choose and gate cash vs stock election.")
     p.add_argument("--rolling-window-events", type=int, default=50,
                    help="Number of prior labeled events used to fit p and q.")
     p.add_argument("--min-fit-events", type=int, default=10,
@@ -505,10 +520,44 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--default-rational-share", type=float, default=0.3,
                    help="Fallback q before enough rolling observations exist.")
     p.add_argument("--trade-notional", type=float, default=1_000_000.0,
-                   help="Dollar notional for our target long. Borrow cost is assumed zero.")
+                   help="Dollar notional for our target long.")
     p.add_argument("--own-hedge-policy", choices=["dollar_neutral", "conversion_expected", "none"],
-                   default="dollar_neutral",
+                   default="conversion_expected",
                    help="How to size the acquirer short leg for realized P&L.")
+    p.add_argument("--holding-period-days", type=int, default=30,
+                   help="Fallback holding period for borrow/deal-break cost calculations when dates are unavailable.")
+    p.add_argument("--mc-draws", type=int, default=2000,
+                   help="Monte Carlo draws per event/election choice. Use 0 to disable.")
+    p.add_argument("--mc-seed", type=int, default=1729)
+    p.add_argument("--mc-demand-concentration", type=float, default=75.0,
+                   help="Beta concentration around predicted cash demand. Higher values mean less demand uncertainty.")
+    p.add_argument("--mc-min-beta-alpha", type=float, default=0.25,
+                   help="Minimum beta shape parameter used when predicted demand is near zero or one.")
+    p.add_argument("--deal-break-prob", type=float, default=0.0,
+                   help="Fallback deal-break probability if no event-level column is supplied.")
+    p.add_argument("--enable-deal-outcome-model", dest="enable_deal_outcome_model",
+                   action="store_true", default=True,
+                   help="Fit a rolling pre-outcome model for completed/terminated/withdrawn probabilities.")
+    p.add_argument("--disable-deal-outcome-model", dest="enable_deal_outcome_model",
+                   action="store_false",
+                   help="Disable rolling deal-outcome prediction and use event/default break probabilities only.")
+    p.add_argument("--outcome-rolling-window-events", type=int, default=250,
+                   help="Number of prior labeled deals used to fit the outcome model.")
+    p.add_argument("--outcome-min-fit-events", type=int, default=25,
+                   help="Minimum prior outcome-labeled deals before using the rolling outcome model.")
+    p.add_argument("--default-completed-prob", type=float, default=0.90)
+    p.add_argument("--default-terminated-prob", type=float, default=0.07)
+    p.add_argument("--default-withdrawn-prob", type=float, default=0.03)
+    p.add_argument("--withdrawn-share-of-break-prob", type=float, default=0.35,
+                   help="Fallback split of aggregate deal-break probability assigned to withdrawn.")
+    p.add_argument("--break-loss-pct", type=float, default=0.30,
+                   help="Fallback target loss if the deal breaks and no break-price column is supplied.")
+    p.add_argument("--terminated-break-loss-pct", type=float, default=0.25,
+                   help="Fallback target loss for mutually terminated deals.")
+    p.add_argument("--withdrawn-break-loss-pct", type=float, default=0.35,
+                   help="Fallback target loss for withdrawn deals.")
+    p.add_argument("--acquirer-break-return-pct", type=float, default=0.0,
+                   help="Fallback acquirer return in a deal-break scenario for the short hedge.")
     return p.parse_args()
 
 
