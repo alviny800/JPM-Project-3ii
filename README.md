@@ -10,9 +10,11 @@ these extractions.
 > election-demand labels, near the disclosure ceiling). The downstream modeling is the finalized
 > Monte Carlo prototype in `ARB_FRAMEWORK.md`: a calibrated demand distribution (KS p=0.96) →
 > proration mechanics → simulated payoff → a risk-aware trade blotter (88 priced signals,
-> 41 long ENTER, 20 passive-settlement REVERSE), with capacity/election-impact sizing.
-> The current strategy summary reports ~$944.3m profit-optimal capacity, ~$123.2m expected
-> P&L, and ~$28.5m covered realized P&L after self-impact election settlement.
+> 5 long ENTER, 15 passive-settlement REVERSE, 15 REVIEW), with capacity/election-impact sizing.
+> The current strategy summary reports ~$766m profit-optimal notional, ~$50m expected P&L, and
+> ~$31.6m covered realized P&L (corr 0.96, 100% hit on 16 covered trades). Figures are for the
+> reproducible default run and depend on how `deal_outcome_probabilities.csv` is generated
+> (`arb_outcome.py`) — regenerate before comparing.
 
 ## Core files
 
