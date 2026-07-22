@@ -10,6 +10,10 @@ given the deal terms. So the model is:
     draw f_cash  ->  proration mechanics  ->  optimal-election consideration  ->  edge / P&L
     (repeat N times -> a distribution)
 
+The trade layer can then overlay completed/terminated/withdrawn state probabilities.  The
+MC engine keeps the older aggregate p_break interface for compatibility, but the newer
+three-state inputs are preferred when available.
+
 Two economic facts drive the whole thing:
   1. In a fully-prorated deal the *blended* (average) consideration is FIXED by the cash pool
      pi_cash:   blended = pi_cash*C + (1-pi_cash)*stock_val   — independent of demand.
@@ -104,14 +108,74 @@ def prorate(f_cash, pi_cash, C, stock_val):
     return cash_holder, stock_holder, blended, optimal
 
 
+def normalize_state_probabilities(p_completed=None, p_terminated=None, p_withdrawn=None, p_break=0.0):
+    """Normalize completed/terminated/withdrawn probabilities.
+
+    Backward compatibility: callers that only pass p_break get the old two-state
+    behavior, represented as all break probability in the terminated bucket.
+    """
+    if p_terminated is None and p_withdrawn is None:
+        pb = float(np.clip(p_break, 0.0, 1.0))
+        p_completed = 1.0 - pb if p_completed is None else p_completed
+        p_terminated = pb
+        p_withdrawn = 0.0
+    else:
+        p_terminated = 0.0 if p_terminated is None else p_terminated
+        p_withdrawn = 0.0 if p_withdrawn is None else p_withdrawn
+        p_completed = 1.0 - p_terminated - p_withdrawn if p_completed is None else p_completed
+
+    probs = np.array([p_completed, p_terminated, p_withdrawn], dtype=float)
+    probs = np.clip(np.nan_to_num(probs, nan=0.0), 0.0, 1.0)
+    total = probs.sum()
+    if total <= 0:
+        probs = np.array([1.0, 0.0, 0.0])
+    else:
+        probs = probs / total
+    return {"completed": float(probs[0]), "terminated": float(probs[1]), "withdrawn": float(probs[2])}
+
+
+def apply_outcome_overlay(complete_values, entry_value, p_completed=None, p_terminated=None, p_withdrawn=None,
+                          p_break=0.0, terminated_value=None, withdrawn_value=None,
+                          break_loss_frac=0.25, terminated_loss_frac=0.25,
+                          withdrawn_loss_frac=0.35, rng=None):
+    """Map completion payoff draws into a three-state realized payoff distribution."""
+    rng = rng or np.random.default_rng(7)
+    complete_values = np.asarray(complete_values, float)
+    entry_value = float(entry_value)
+    probs = normalize_state_probabilities(
+        p_completed=p_completed,
+        p_terminated=p_terminated,
+        p_withdrawn=p_withdrawn,
+        p_break=p_break,
+    )
+    if terminated_value is None:
+        loss = break_loss_frac if p_terminated is None and p_withdrawn is None else terminated_loss_frac
+        terminated_value = entry_value * (1.0 - loss)
+    if withdrawn_value is None:
+        loss = break_loss_frac if p_terminated is None and p_withdrawn is None else withdrawn_loss_frac
+        withdrawn_value = entry_value * (1.0 - loss)
+
+    u = rng.random(len(complete_values))
+    realized = np.where(
+        u < probs["completed"],
+        complete_values,
+        np.where(u < probs["completed"] + probs["terminated"], terminated_value, withdrawn_value),
+    )
+    return realized, probs
+
+
 # ------------------------------ simulation ------------------------------
 def simulate_deal(deal, model, n=20000, condition=False, p_break=0.0, break_loss_frac=0.25,
+                  p_completed=None, p_terminated=None, p_withdrawn=None,
+                  terminated_loss_frac=0.25, withdrawn_loss_frac=0.35,
+                  entry_value=None, terminated_value=None, withdrawn_value=None,
                   rng=None):
     """
     MC one deal. Returns a dict of the consideration/edge/return distributions.
     edge = optimal-election consideration - blended average  (the proration-capture alpha, per share)
-    If p_break>0, overlay deal-break risk: with prob p_break the position loses break_loss_frac of
-    the blended value (target reverts) instead of realizing consideration.
+    If p_break>0, overlay the legacy two-state break scenario.  If
+    p_terminated/p_withdrawn are supplied, overlay a completed/terminated/withdrawn
+    state tree instead.
     """
     rng = rng or np.random.default_rng(7)
     C, R, Pacq, pi = deal["C"], deal["R"], deal["P_acq"], deal["pi_cash"]
@@ -119,13 +183,26 @@ def simulate_deal(deal, model, n=20000, condition=False, p_break=0.0, break_loss
     f = model.draw(n, spread=deal.get("spread", np.nan), rng=rng, condition=condition)
     cash_h, stock_h, blended, optimal = prorate(f, pi, C, stock_val)
     edge = optimal - blended
-    realized = optimal.copy()
-    if p_break > 0:
-        broke = rng.random(n) < p_break
-        realized = np.where(broke, blended * (1 - break_loss_frac), optimal)
+    entry_value = blended if entry_value is None else entry_value
+    realized, probs = apply_outcome_overlay(
+        optimal,
+        entry_value=entry_value,
+        p_completed=p_completed,
+        p_terminated=p_terminated,
+        p_withdrawn=p_withdrawn,
+        p_break=p_break,
+        terminated_value=terminated_value,
+        withdrawn_value=withdrawn_value,
+        break_loss_frac=break_loss_frac,
+        terminated_loss_frac=terminated_loss_frac,
+        withdrawn_loss_frac=withdrawn_loss_frac,
+        rng=rng,
+    )
     return {"f_cash": f, "cash_holder": cash_h, "stock_holder": stock_h,
             "blended": float(blended), "optimal": optimal, "edge": edge, "realized": realized,
-            "spread": deal.get("spread", np.nan), "stock_val": float(stock_val)}
+            "p_completed": probs["completed"], "p_terminated": probs["terminated"],
+            "p_withdrawn": probs["withdrawn"], "spread": deal.get("spread", np.nan),
+            "stock_val": float(stock_val)}
 
 
 def summarize(sim):

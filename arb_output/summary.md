@@ -16,11 +16,12 @@
 ## 4. Portfolio Monte Carlo
 - Equal-weight 32 deals, 20,000 paths.
 - Proration edge (no break): mean **8.64%**.
-- With a **12% deal-break** scenario (revert 25% of blended): mean **4.63%**, 5th-pct **0.32%** — the tail is deal-break risk, not election risk.
+- With event-level completed/terminated/withdrawn probabilities averaging **20.3% terminated/withdrawn** (terminated loss 25%, withdrawn loss 35%): mean **1.33%**, 5th-pct **-3.22%** — the tail is deal-outcome risk, not election risk.
 
 ## Spread conditioning
 - logit(demand) slope on deadline spread = **+0.0227** (se 0.0402) → ~flat on our data. Framework supports conditioning; the data says the tilt is weak, so we MC over that slope's uncertainty rather than assert it.
 
-## Honest scope / next data
+## Honest scope / current coverage
 - **Demand distribution: solid (n=73).** Near the disclosure ceiling — no more recoverable from EDGAR (verified: 98% of no-label deals already had the 8-K pulled, the number just isn't disclosed).
-- **Full trade P&L** (vs entry price, survivorship-aware) needs one scoped WRDS pull: extend prices to each deal's close + add the terminated deals for deal-break risk. Figures 1–3 need nothing further.
+- **No new Claude run is needed for this pipeline.** Election/proration demand uses the existing Claude extraction + normalized labels; deal-outcome risk uses BBG `Deal Status` across Completed/Terminated/Withdrawn.
+- The realized election-edge backtest remains the completed-election universe because terminated/withdrawn deals do not have final proration/election outcomes. Their effect enters the trade and portfolio layers through the event-level outcome probabilities.

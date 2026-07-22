@@ -3,8 +3,123 @@
 """Assemble a self-contained walkthrough page (figures embedded as data URIs) for the supervisor."""
 import base64, json, os
 
+import numpy as np
+import pandas as pd
+
 OUT = "arb_output"
 S = json.load(open(f"{OUT}/summary.json"))
+STRATEGY_SUMMARY = "arb_strategy_summary.json"
+
+
+def load_strategy_summary(path=STRATEGY_SUMMARY):
+    if not os.path.exists(path):
+        return {}
+    return json.load(open(path))
+
+
+def signal_summary(path="arb_signals.csv"):
+    if not os.path.exists(path):
+        return {
+            "priced": 0,
+            "enter": 0,
+            "reverse": 0,
+            "review": 0,
+            "trades": 0,
+            "trade_e_mean": np.nan,
+            "trade_realized_mean": np.nan,
+            "trade_hit_rate": np.nan,
+            "signal_corr": np.nan,
+            "capacity_ok": 0,
+            "capacity_median_notional": np.nan,
+            "capacity_max_median_notional": np.nan,
+            "capacity_optimal_median_notional": np.nan,
+            "capacity_enter_median_notional": np.nan,
+            "capacity_reverse_median_notional": np.nan,
+            "capacity_median_ownership": np.nan,
+            "capacity_e_mean": np.nan,
+            "capacity_realized_mean": np.nan,
+            "capacity_hit_rate": np.nan,
+            "optimal_total_notional": np.nan,
+            "optimal_expected_pnl": np.nan,
+            "optimal_weighted_e": np.nan,
+            "baseline_realized_pnl": np.nan,
+            "baseline_return_on_deployed": np.nan,
+            "self_impact_realized_pnl": np.nan,
+            "self_impact_return_on_deployed": np.nan,
+            "wrong_self_impact": 0,
+            "missed_pass": 0,
+        }
+    sig = pd.read_csv(path)
+    strategy = load_strategy_summary()
+    optimal = strategy.get("profit_optimal", {})
+    holder_model = strategy.get("holder_model", {})
+    realized_baseline = strategy.get("realized_baseline_accept_historical_election", {}).get("optimal", {})
+    realized_self = strategy.get("realized_self_impact_election", {}).get("optimal", {})
+    trade_quality = strategy.get("trade_quality", {})
+    counts = sig["signal"].value_counts()
+    trades = sig[sig["signal"].isin(["ENTER", "REVERSE"])]
+    realized = trades["realized_return_%"].dropna() if len(trades) else pd.Series(dtype=float)
+    cap_realized = (
+        trades["capacity_adjusted_realized_return_%"].dropna()
+        if "capacity_adjusted_realized_return_%" in trades and len(trades)
+        else pd.Series(dtype=float)
+    )
+    paired = trades[["E_return_%", "realized_return_%"]].dropna() if len(trades) else pd.DataFrame()
+    corr = np.corrcoef(paired["E_return_%"], paired["realized_return_%"])[0, 1] if len(paired) > 2 else np.nan
+    return {
+        "priced": int(len(sig)),
+        "enter": int(counts.get("ENTER", 0)),
+        "reverse": int(counts.get("REVERSE", 0)),
+        "review": int(counts.get("REVIEW", 0)),
+        "trades": int(len(trades)),
+        "trade_e_mean": float(trades["E_return_%"].mean()) if len(trades) else np.nan,
+        "trade_realized_mean": float(realized.mean()) if len(realized) else np.nan,
+        "trade_hit_rate": float((realized > 0).mean() * 100) if len(realized) else np.nan,
+        "signal_corr": float(corr) if np.isfinite(corr) else np.nan,
+        "capacity_ok": int(trades["capacity_status"].eq("ok").sum()) if "capacity_status" in trades else 0,
+        "capacity_median_notional": float(trades["capacity_notional"].median())
+        if "capacity_notional" in trades and len(trades) else np.nan,
+        "capacity_max_median_notional": float(trades["capacity_max_notional"].median())
+        if "capacity_max_notional" in trades and len(trades) else np.nan,
+        "capacity_optimal_median_notional": float(trades["capacity_optimal_notional"].median())
+        if "capacity_optimal_notional" in trades and len(trades) else np.nan,
+        "capacity_enter_median_notional": float(sig.loc[sig["signal"].eq("ENTER"), "capacity_notional"].median())
+        if "capacity_notional" in sig and counts.get("ENTER", 0) else np.nan,
+        "capacity_reverse_median_notional": float(sig.loc[sig["signal"].eq("REVERSE"), "capacity_notional"].median())
+        if "capacity_notional" in sig and counts.get("REVERSE", 0) else np.nan,
+        "capacity_median_ownership": float(trades["capacity_pct_shares_outstanding"].median())
+        if "capacity_pct_shares_outstanding" in trades and len(trades) else np.nan,
+        "capacity_e_mean": float(trades["capacity_adjusted_E_return_%"].mean())
+        if "capacity_adjusted_E_return_%" in trades and len(trades) else np.nan,
+        "capacity_realized_mean": float(cap_realized.mean()) if len(cap_realized) else np.nan,
+        "capacity_hit_rate": float((cap_realized > 0).mean() * 100) if len(cap_realized) else np.nan,
+        "optimal_total_notional": float(optimal.get("total_notional", np.nan)),
+        "optimal_expected_pnl": float(optimal.get("total_expected_pnl", np.nan)),
+        "optimal_weighted_e": float(optimal.get("notional_weighted_expected_return_%", np.nan)),
+        "baseline_realized_pnl": float(realized_baseline.get("total_realized_pnl", np.nan)),
+        "baseline_return_on_deployed": float(realized_baseline.get("return_on_deployed_notional_%", np.nan)),
+        "self_impact_realized_pnl": float(realized_self.get("total_realized_pnl", np.nan)),
+        "self_impact_return_on_deployed": float(realized_self.get("return_on_deployed_notional_%", np.nan)),
+        "wrong_self_impact": int(realized_self.get("wrong_trade_count", 0)),
+        "missed_pass": int(trade_quality.get("missed_profitable_pass_count_marginal_proxy", 0)),
+        "holder_median_fit_n": float(holder_model.get("median_fit_n", np.nan)),
+        "holder_median_p_hat": float(holder_model.get("median_p_hat", np.nan)),
+        "holder_median_q_hat": float(holder_model.get("median_q_hat", np.nan)),
+        "holder_median_positive_active": float(holder_model.get("median_positive_share_of_active_%", np.nan)),
+    }
+
+
+SIG = signal_summary()
+BREAK_PCT = float(S.get("portfolio_break_scenario", {}).get("p_break", np.nan)) * 100.0
+
+
+def fmt_pct(value, digits=1):
+    return "n/a" if not np.isfinite(value) else f"{value:.{digits}f}%"
+
+
+def fmt_money_m(value, digits=1):
+    return "n/a" if not np.isfinite(value) else f"${value/1_000_000:.{digits}f}m"
+
 
 def img(name):
     b = base64.b64encode(open(f"{OUT}/{name}", "rb").read()).decode()
@@ -51,7 +166,7 @@ h1 {{ font-family:var(--serif); font-weight:600; font-size:40px; line-height:1.1
 .chip.ok {{ color:var(--good); border-color:color-mix(in srgb,var(--good) 40%,var(--line)); }}
 
 /* scorecard */
-.cards {{ display:grid; grid-template-columns:repeat(4,1fr); gap:14px; margin:38px 0 8px; }}
+.cards {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:14px; margin:38px 0 8px; }}
 .card {{ background:var(--surface); border:1px solid var(--line); border-radius:12px; padding:16px 16px 15px; }}
 .card .k {{ font-family:var(--mono); font-size:11px; text-transform:uppercase; letter-spacing:.09em;
   color:var(--faint); margin:0 0 9px; }}
@@ -104,10 +219,11 @@ footer {{ border-top:1px solid var(--line); color:var(--faint); font-size:12.5px
   <p class="sub">A Monte Carlo that simulates how shareholders elect cash vs. stock, pushes each draw through
   the deal's proration mechanics, and produces a distribution of realized consideration and strategy P&amp;L.</p>
   <div class="meta">
-    <span class="chip"><b>72</b> disclosed election outcomes</span>
-    <span class="chip"><b>25</b> fully MC-ready deals</span>
+    <span class="chip"><b>{S['demand_calibration_set']}</b> disclosed election outcomes</span>
+    <span class="chip"><b>{S['mc_ready_deals']}</b> fully MC-ready deals</span>
+    <span class="chip"><b>{SIG['priced']}</b> priced signals</span>
     <span class="chip ok">calibration KS&nbsp;p&nbsp;=&nbsp;<b>{S['calibration_ks_p']}</b> · passes</span>
-    <span class="chip">as of 2026-07-16</span>
+    <span class="chip">as of 2026-07-21</span>
   </div>
 </div></header>
 
@@ -118,6 +234,8 @@ footer {{ border-top:1px solid var(--line); color:var(--faint); font-size:12.5px
     <div class="card good"><p class="k">Model calibration</p><div class="v">{S['calibration_pit_mean']}</div><p class="n">PIT mean (ideal 0.50) · {int(S['calibration_in80']*100)}% in 80% band</p></div>
     <div class="card signal"><p class="k">Realized edge</p><div class="v">100<small>% +ve</small></div><p class="n">median {S['realized_edge_median_pct']}% of blended</p></div>
     <div class="card signal"><p class="k">Portfolio · w/ break</p><div class="v">{S['portfolio_with_break_mean_pct']}<small>%</small></div><p class="n">5th-pct {S['portfolio_with_break_p05_pct']}% — tail is deal-break</p></div>
+    <div class="card signal"><p class="k">Trade blotter</p><div class="v">{SIG['trades']}<small> trades</small></div><p class="n">{SIG['enter']} ENTER · {SIG['reverse']} REVERSE · {SIG['review']} REVIEW</p></div>
+    <div class="card signal"><p class="k">Optimal capacity</p><div class="v">{fmt_money_m(SIG['optimal_total_notional'])}</div><p class="n">median trade {fmt_money_m(SIG['capacity_optimal_median_notional'])} · ownership {SIG['capacity_median_ownership']:.2f}%</p></div>
   </div>
 
   <section>
@@ -129,7 +247,7 @@ footer {{ border-top:1px solid var(--line); color:var(--faint); font-size:12.5px
 
   <section>
     <h2>Where the sample comes from</h2>
-    <p class="lead">2,068 raw deals → 72 with a disclosed election split. The two largest cuts are structural, not pipeline losses.</p>
+    <p class="lead">2,068 raw deals → {S['demand_calibration_set']} with a disclosed election split. The two largest cuts are structural, not pipeline losses.</p>
     <table>
       <thead><tr><th>Filter</th><th style="text-align:right">Remaining</th><th>Why it drops</th></tr></thead>
       <tbody>
@@ -138,18 +256,18 @@ footer {{ border-top:1px solid var(--line); color:var(--faint); font-size:12.5px
         <tr class="drop"><td>Keep completed</td><td class="n">619</td><td>−108 terminated / withdrawn</td></tr>
         <tr class="drop"><td>US + resolvable identifier</td><td class="n">317</td><td>−302 non-US — no EDGAR filings to read</td></tr>
         <tr><td>Ran through EDGAR + Claude</td><td class="n">303</td><td>−14 no CIK / no election filing found</td></tr>
-        <tr class="keep"><td><b>Clean disclosed election demand</b></td><td class="n">72</td><td>−231 not disclosed, or unparseable prose</td></tr>
+        <tr class="keep"><td><b>Clean disclosed election demand</b></td><td class="n">{S['demand_calibration_set']}</td><td>not disclosed, or unparseable prose</td></tr>
       </tbody>
     </table>
     <div class="callout"><p class="k">Verified: this is a disclosure ceiling, not a bug</p>
-      <p>Of the 231 with no clean label, <b>98% already had the post-close 8-K pulled</b> — the election split simply isn’t disclosed in it (small deals file terse “merger completed” notices). Re-tuning the document pull would recover ~0 deals. The 72 are close to the real limit of what public disclosure supports.</p></div>
+      <p>Of the 231 with no clean label, <b>98% already had the post-close 8-K pulled</b> — the election split simply isn’t disclosed in it (small deals file terse “merger completed” notices). Re-tuning the document pull would recover ~0 deals. The {S['demand_calibration_set']} are close to the real limit of what public disclosure supports.</p></div>
   </section>
 
   <section>
     <h2>The demand model — and is it honest?</h2>
     <p class="lead">The distribution the Monte Carlo samples, and a leave-one-out test of whether we can trust it.</p>
     <figure><img alt="Election demand distribution with fitted Beta" src="{FIG1}">
-      <figcaption><b>Fig 1 — Election-demand distribution.</b> Realized cash-election fractions across 72 deals, with a fitted Beta({S['demand_beta'][0]}, {S['demand_beta'][1]}). The U-shape is economically real: holders pile toward one corner (“almost all cash” or “almost all stock”), because election is close to a binary value decision.</figcaption></figure>
+      <figcaption><b>Fig 1 — Election-demand distribution.</b> Realized cash-election fractions across {S['demand_calibration_set']} deals, with a fitted Beta({S['demand_beta'][0]}, {S['demand_beta'][1]}). The U-shape is economically real: holders pile toward one corner (“almost all cash” or “almost all stock”), because election is close to a binary value decision.</figcaption></figure>
     <figure><img alt="Leave-one-out calibration PIT histogram" src="{FIG2}">
       <figcaption><b>Fig 2 — Calibration backtest.</b> Leave-one-out PIT values sit flat and uniform: mean <span class="mono">{S['calibration_pit_mean']}</span> (ideal 0.50), <span class="mono">{int(S['calibration_in80']*100)}%</span> inside the 80% band, <span class="mono">KS p = {S['calibration_ks_p']}</span>. The model is indistinguishable from perfectly calibrated <b>out-of-sample</b> — the credibility anchor for everything downstream.</figcaption></figure>
   </section>
@@ -165,22 +283,32 @@ footer {{ border-top:1px solid var(--line); color:var(--faint); font-size:12.5px
     <h2>Portfolio Monte Carlo</h2>
     <p class="lead">Equal-weight the MC-ready deals, 20,000 paths, with a deal-break overlay.</p>
     <figure><img alt="Portfolio P&amp;L distribution with deal-break overlay" src="{FIG4}">
-      <figcaption><b>Fig 4 — Portfolio P&amp;L.</b> Pure proration edge (blue) sits positive; a <b>12% deal-break scenario</b> (mauve, revert 25% of blended) shifts it left to a <span class="mono">{S['portfolio_with_break_mean_pct']}%</span> mean and opens a downside tail (5th-pct <span class="mono">{S['portfolio_with_break_p05_pct']}%</span>). Crucially, <b>the left tail is deal-break risk, not election risk</b> — the election model itself is well-behaved.</figcaption></figure>
+      <figcaption><b>Fig 4 — Portfolio P&amp;L.</b> Pure proration edge (blue) sits positive; a <b>{fmt_pct(BREAK_PCT, 1)} deal-break scenario</b> (mauve, with state-specific break losses) shifts it left to a <span class="mono">{S['portfolio_with_break_mean_pct']}%</span> mean and opens a downside tail (5th-pct <span class="mono">{S['portfolio_with_break_p05_pct']}%</span>). Crucially, <b>the left tail is deal-break risk, not election risk</b> — the election model itself is well-behaved.</figcaption></figure>
     <div class="callout"><p class="k">On spread conditioning</p>
-      <p>Rational holders should tilt toward the richer side, so demand ought to respond to the deadline spread. On our data that logit slope is <span class="mono">≈ 0</span> (thin, n=25). The framework <b>supports</b> conditioning but doesn’t assert it — it Monte-Carlos over the slope’s uncertainty rather than overfitting a curve.</p></div>
+      <p>Rational holders should tilt toward the richer side, so demand ought to respond to the deadline spread. On our data that logit slope is <span class="mono">≈ 0</span> (thin, n={S['mc_ready_deals']}). The framework <b>supports</b> conditioning but doesn’t assert it — it Monte-Carlos over the slope’s uncertainty rather than overfitting a curve.</p></div>
+  </section>
+
+  <section>
+    <h2>Risk-aware trade layer</h2>
+    <p class="lead">The signal layer prices both the long election strategy and the reverse trade under completed / terminated / withdrawn probabilities.</p>
+    <p><span class="snum">01</span><b>ENTER</b> buys the target, elects the higher-expected side, and shorts the expected acquirer-stock receipt. This is the election-right trade.</p>
+    <p><span class="snum">02</span><b>REVERSE</b> shorts the target only when the passive settlement liability is attractive after outcome risk. It has <b>no election right</b>, so completion payoff is the blended consideration, not the optimal elected side.</p>
+    <p><span class="snum">03</span>Current blotter: <span class="mono">{SIG['priced']}</span> priced signals, <span class="mono">{SIG['enter']}</span> ENTER, <span class="mono">{SIG['reverse']}</span> REVERSE, <span class="mono">{SIG['review']}</span> REVIEW. Trade-book mean expected return is <span class="mono">{fmt_pct(SIG['trade_e_mean'])}</span>; realized coverage mean is <span class="mono">{fmt_pct(SIG['trade_realized_mean'])}</span> with hit rate <span class="mono">{fmt_pct(SIG['trade_hit_rate'], 0)}</span>. Signal/realized correlation on covered trades is <span class="mono">{SIG['signal_corr']:+.2f}</span>.</p>
+    <p><span class="snum">04</span><b>Capacity overlay.</b> ENTER capacity is finite because our target shares change aggregate election demand. Holder composition now comes from the rolling structural model: <span class="mono">q_hat</span> estimates EV-sensitive holders and <span class="mono">p_hat</span> estimates noisy cash-election propensity from prior disclosed events. Current trade median fit depth is <span class="mono">{SIG['holder_median_fit_n']:.0f}</span>, median <span class="mono">p_hat={SIG['holder_median_p_hat']:.1f}</span>, median <span class="mono">q_hat={SIG['holder_median_q_hat']:.1f}</span>, and median positive-holder share of active is <span class="mono">{fmt_pct(SIG['holder_median_positive_active'])}</span>. REVERSE remains borrow/sale constrained and keeps passive settlement because it has no election right. Maximum and optimal coincide in this run: total optimal notional is <span class="mono">{fmt_money_m(SIG['optimal_total_notional'])}</span>, expected P&amp;L is <span class="mono">{fmt_money_m(SIG['optimal_expected_pnl'])}</span>, and weighted expected return is <span class="mono">{fmt_pct(SIG['optimal_weighted_e'])}</span>. Historical-election realized P&amp;L is <span class="mono">{fmt_money_m(SIG['baseline_realized_pnl'])}</span>; self-impact realized P&amp;L is <span class="mono">{fmt_money_m(SIG['self_impact_realized_pnl'])}</span> with <span class="mono">{SIG['wrong_self_impact']}</span> wrong trades and <span class="mono">{SIG['missed_pass']}</span> profitable PASS-row miss.</p>
   </section>
 
   <section>
     <h2>What’s solid, and what needs one more pull</h2>
     <ul class="scope">
-      <li><b>Demand distribution — solid (n=72) and near the disclosure ceiling.</b> No more recoverable from EDGAR; a ~$7 sharp-prompt re-extraction of ~26 fixed-ratio deals is in flight to firm the tails.</li>
-      <li><b>Calibration &amp; realized-edge — done, on existing data.</b> Figures 1–3 need nothing further.</li>
-      <li class="todo"><b>Full trade P&amp;L vs entry price (survivorship-aware) — one scoped WRDS pull.</b> Extend daily prices to each deal’s close, and add the terminated deals for deal-break risk. Only 7% of deals currently have prices reaching close.</li>
-      <li class="todo"><b>Selection caveat to state plainly.</b> The 72 disclosers skew large/liquid — the demand distribution is “demand among deals that disclose,” which happens to be the tradeable set.</li>
+      <li><b>Demand distribution — solid (n={S['demand_calibration_set']}) and near the disclosure ceiling.</b> No more material recovery expected from EDGAR; the missing labels are mostly not disclosed.</li>
+      <li><b>Calibration, realized edge, and outcome-risk overlay — done on local inputs.</b> The current run uses event-level completed / terminated / withdrawn probabilities where available.</li>
+      <li><b>Risk-aware long/reverse signal layer — done.</b> The reverse strategy explicitly uses passive blended settlement because the short side has no election right.</li>
+      <li><b>Capacity and election-impact overlay — done.</b> Holder mix is now rolling-estimated from prior events, and the blotter reports raw maximum, risk-gated maximum, profit-optimal size, historical-election realized P&amp;L, and self-impact election realized P&amp;L.</li>
+      <li class="todo"><b>Selection caveat to state plainly.</b> The disclosers skew large/liquid — the demand distribution is “demand among deals that disclose,” which is close to the tradeable set but not the full M&amp;A universe.</li>
     </ul>
   </section>
 
-  <footer>Election-arb MC framework · arb_terms → arb_mc → arb_backtest → arb_run · figures generated {20000:,}-path · 2026-07-16</footer>
+  <footer>Election-arb MC framework · arb_terms → arb_outcome → arb_mc → arb_backtest → arb_run → arb_signal · figures generated {20000:,}-path · 2026-07-21</footer>
 </div>
 """
 open(f"{OUT}/walkthrough.html", "w").write(html)
