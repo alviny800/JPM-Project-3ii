@@ -1,22 +1,116 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-build_cik_overrides.py
+"""cik_resolution.py — CIK resolution tooling (EDGAR full-text search, $0).
 
-Find + VERIFY correct CIKs for the recoverable tail of the CIK-resolution audit
-(unmatched-but-has-CRSP-close, and matched-but-score<95 false-positive risk).
+Subcommands:
+  audit            run the name->CIK matcher across the universe -> cik_resolution_audit.csv
+  build-overrides  verify CIKs for the recoverable tail          -> cik_override_candidates.csv
 
-For each target it (1) re-queries EDGAR full-text search with a CLEANED name
-(strips "/old", "/The", "/Durham NC" geo tags, entity suffixes) to get candidate
-CIKs, then (2) VERIFIES each candidate by pulling its EDGAR submissions history and
-checking whether it filed a merger-type form (8-K/425/DEFM14A/15-12B/25) within a
-window of the target's CRSP close date. A candidate that filed a merger doc right at
-close is almost certainly the real target.
-
-Cost $0 (EDGAR only). Writes cik_override_candidates.csv for human review; the final
-hand-picked cik_manual_overrides.csv is assembled from it.
+Merges the former audit_cik_resolution.py + build_cik_overrides.py; logic is verbatim.
+Typical order:  cik_resolution.py audit    then    cik_resolution.py build-overrides
 """
 from __future__ import annotations
+import sys
+
+import argparse
+from pathlib import Path
+
+import pandas as pd
+
+import download_ma_edgar_files as dl
+
+
+def main_audit() -> None:
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--input", default="US_election_deals_for_analysis.csv", type=Path)
+    p.add_argument("--close-dates", default="target_close_dates.csv", type=Path)
+    p.add_argument("--out", default="cik_resolution_audit.csv", type=Path)
+    p.add_argument("--user-agent", default="election-arb-research alviny800@gmail.com")
+    p.add_argument("--min-name-score", type=float, default=84.0)
+    p.add_argument("--cache-dir", default="ma_edgar_audit_cache", type=Path)
+    args = p.parse_args()
+
+    df = pd.read_csv(args.input, dtype=str, keep_default_na=False)
+
+    # Close-date presence = the downstream safety net; note it per target.
+    close_by_c8: dict = {}
+    if args.close_dates.exists():
+        cd = pd.read_csv(args.close_dates, dtype=str, keep_default_na=False)
+        for _, r in cd.iterrows():
+            if r.get("close_date"):
+                close_by_c8[r.get("target_cusip8", "")] = r["close_date"]
+
+    def cusip8(v: str) -> str:
+        import re
+        return re.sub(r"[^0-9A-Za-z]", "", str(v)).upper()[:8]
+
+    client = dl.SecClient(user_agent=args.user_agent, cache_dir=args.cache_dir)
+    cik_df = dl.load_company_tickers(client, args.cache_dir / "company_tickers.json")
+    print(f"[load] company_tickers.json: {len(cik_df):,} current registrants")
+    n_ovr = dl.load_cik_overrides(Path("cik_manual_overrides.csv"))
+    print(f"[load] cik_manual_overrides.csv: {n_ovr} hand-verified overrides")
+    print(f"[run] resolving {len(df):,} target names via efts (primary) + fuzzy (fallback)...")
+
+    rows = []
+    for i, ev in df.iterrows():
+        name = str(ev.get("Target Name", "")).strip()
+        m = dl.override_match(name)
+        if m is not None:
+            method = "manual_override"
+        else:
+            m = dl.resolve_cik_via_efts(client, name, min_score=args.min_name_score)
+            method = "efts"
+        if not m.get("matched"):
+            mt = dl.fuzzy_match_company(name, cik_df, min_score=args.min_name_score)
+            if mt.get("matched") or float(mt.get("score", 0) or 0) > float(m.get("score", 0) or 0):
+                m = mt
+                method = "fuzzy_fallback"
+        c8 = cusip8(ev.get("Target cusip", ""))
+        rows.append({
+            "target_name": name,
+            "matched": bool(m.get("matched")),
+            "score": float(m.get("score", 0) or 0),
+            "resolved_via": method if m.get("matched") else "NONE",
+            "sec_title": m.get("sec_title", ""),
+            "cik10": m.get("cik10", ""),
+            "ticker": m.get("ticker", ""),
+            "target_cusip": ev.get("Target cusip", ""),
+            "has_crsp_close": c8 in close_by_c8,
+            "crsp_close": close_by_c8.get(c8, ""),
+        })
+        if (i + 1) % 25 == 0:
+            print(f"  ...{i + 1}/{len(df)}")
+
+    out = pd.DataFrame(rows).sort_values(["matched", "score"], ascending=[True, True])
+    out.to_csv(args.out, index=False)
+
+    n = len(out)
+    n_match = int(out["matched"].sum())
+    n_efts = int((out["resolved_via"] == "efts").sum())
+    n_fuzzy = int((out["resolved_via"] == "fuzzy_fallback").sum())
+    n_none = int((out["resolved_via"] == "NONE").sum())
+    # confidence tiers among matched
+    md = out[out["matched"]]
+    strong = int((md["score"] >= 95).sum())
+    ok = int(((md["score"] >= 88) & (md["score"] < 95)).sum())
+    weak = int((md["score"] < 88).sum())
+    # safety net: matched but low score AND no crsp close = highest risk
+    risk = out[(~out["matched"]) | ((out["score"] < 90) & (~out["has_crsp_close"]))]
+
+    print(f"\n=== CIK RESOLUTION AUDIT ({n} targets) ===")
+    print(f"  matched:            {n_match}/{n} ({n_match/n*100:.0f}%)")
+    print(f"    via efts:         {n_efts}")
+    print(f"    via fuzzy fallb.: {n_fuzzy}")
+    print(f"  UNMATCHED:          {n_none}")
+    print(f"\n  confidence of matched (by name score):")
+    print(f"    strong (>=95):    {strong}")
+    print(f"    ok     (88-95):   {ok}")
+    print(f"    weak   (<88):     {weak}")
+    print(f"\n  {len(risk)} targets in the review tail (unmatched, or score<90 w/ no CRSP close-date net)")
+    print(f"\n[write] {args.out}  (sorted worst-first)")
+    print("\nWorst 15:")
+    cols = ["target_name", "matched", "score", "resolved_via", "sec_title", "has_crsp_close"]
+    print(out[cols].head(15).to_string(index=False))
 
 import argparse
 import re
@@ -101,7 +195,7 @@ def verify_close(client: dl.SecClient, cik10: str, close: pd.Timestamp, window_d
     return out
 
 
-def main() -> None:
+def main_build_overrides() -> None:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--audit", default="cik_resolution_audit.csv", type=Path)
     p.add_argument("--out", default="cik_override_candidates.csv", type=Path)
@@ -176,6 +270,17 @@ def main() -> None:
     out.to_csv(args.out, index=False)
     n_ok = int(out["filed_merger_near_close"].sum())
     print(f"\n[write] {args.out}: {len(out)} targets, {n_ok} verified by a merger filing near close")
+
+
+def main():
+    if len(sys.argv) < 2 or sys.argv[1] not in ("audit", "build-overrides",):
+        print("usage: {} {{audit | build-overrides}} [options]".format(sys.argv[0].split("/")[-1]))
+        sys.exit(2)
+    sub = sys.argv.pop(1)
+    if sub == "audit":
+        main_audit()
+    elif sub == "build-overrides":
+        main_build_overrides()
 
 
 if __name__ == "__main__":

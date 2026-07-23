@@ -1,35 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+"""prepare_input_identifiers.py — build the analysis file's identifier columns from scratch.
+
+Subcommands:
+  backfill-cusips  re-resolve US CUSIPs from CRSP stocknames (Excel corrupts the BBG column)
+  clean-tickers    add Target/Acquirer Ticker Clean columns (strip " US", blank placeholders)
+
+Merges the former backfill_cusips.py + add_clean_ticker_cols.py; logic is verbatim.
+Run order from a fresh BBG pull:  backfill-cusips  ->  clean-tickers
 """
-backfill_cusips.py
-
-Re-resolve US-listed security CUSIPs in the BBG M&A pull from CRSP `stocknames`,
-because the exported CSV's CUSIP column is unreliable: some are missing (N.A.)
-and many "present" values were silently corrupted by Excel on export
-(scientific notation like `8.81E+104`, or leading-zero truncation like `7903107`
-for a CUSIP that begins with 0).
-
-Strategy (per supervisor decision): treat the BBG CUSIP column as untrusted and
-re-resolve EVERY US-listed security (target + acquirer) fresh from CRSP as-of the
-announce date. Keep the BBG value only as a cross-check and flag mismatches.
-
-CRSP is the right source here because most targets are delisted post-merger;
-current-quote APIs (OpenFIGI etc.) don't retain delisted names, and OpenFIGI
-does not return CUSIP anyway. `stocknames` keeps delisted securities with their
-historical CUSIP and the date range each name/identifier was in effect.
-
-Reuses the existing WRDS plumbing from download_ownership_etf_data.py so there is
-exactly one connection/identifier code path in the repo.
-
-Outputs
--------
-- <out>/BBG_with_resolved_cusips.csv   — original columns + resolved CUSIP cols
-- <out>/cusip_backfill_audit.csv       — one row per US security resolved
-
-Requires: pandas, wrds (+ a matching ~/.pgpass entry or WRDS_PASSWORD).
-"""
-
 from __future__ import annotations
+import sys
 
 import argparse
 import datetime as dt
@@ -392,7 +373,7 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def main() -> None:
+def main_backfill() -> None:
     args = parse_args()
 
     # Phase 1 (own process): pull stocknames from WRDS and exit.
@@ -417,6 +398,51 @@ def main() -> None:
     audit = resolve(sn, secs)
     write_back(df, audit, args.out_dir)
     summarize(audit)
+
+import argparse
+from pathlib import Path
+
+import pandas as pd
+
+
+
+def clean_for_wrds(raw: str) -> str:
+    c = clean_ticker(raw)              # "" if non-US, else "AMZN US" -> "AMZN"
+    if c and BBG_PLACEHOLDER_RE.match(c):
+        return ""                      # placeholder delisted id -> fall back to name
+    return c
+
+
+def main_clean_tickers() -> None:
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--input", default="US_election_deals_for_analysis.csv", type=Path)
+    args = p.parse_args()
+
+    df = pd.read_csv(args.input, dtype=str, keep_default_na=False)
+    for side in ["Target", "Acquirer"]:
+        df[f"{side} Ticker Clean"] = df[f"{side} Ticker"].map(clean_for_wrds)
+
+    df.to_csv(args.input, index=False)
+
+    for side in ["Target", "Acquirer"]:
+        col = f"{side} Ticker Clean"
+        n_ok = (df[col].str.strip() != "").sum()
+        print(f"{col}: {n_ok}/{len(df)} resolvable "
+              f"({len(df)-n_ok} blank: non-US or placeholder)")
+    # sanity: no residual ' US' suffixes
+    bad = df[df["Target Ticker Clean"].str.contains(" US", na=False)]
+    print(f"residual ' US' suffixes: {len(bad)}")
+
+
+def main():
+    if len(sys.argv) < 2 or sys.argv[1] not in ("backfill-cusips", "clean-tickers",):
+        print("usage: {} {{backfill-cusips | clean-tickers}} [options]".format(sys.argv[0].split("/")[-1]))
+        sys.exit(2)
+    sub = sys.argv.pop(1)
+    if sub == "backfill-cusips":
+        main_backfill()
+    elif sub == "clean-tickers":
+        main_clean_tickers()
 
 
 if __name__ == "__main__":

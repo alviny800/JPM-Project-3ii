@@ -23,21 +23,18 @@ these extractions.
 - `Field_File_Timeline_Guide.md` — English guide for project members and Claude prompt design.
 - `download_ownership_etf_data.py` — separate ownership/ETF helper; not a replacement for SEC filing extraction.
 - `download_wrds_market_data.py` — WRDS CRSP market/trading helper for target/acquirer prices, liquidity, shares, market cap, and deal-spread features.
-- `build_election_strategy_model.py` — local merge/audit/model script that combines SEC/Claude, WRDS ownership, and WRDS market outputs into model-ready rows and risk-aware strategy signals.
 - `deal_outcome_model.py` — independent pre-outcome classifier for completed, terminated, and withdrawn deals. Its probabilities enter only at the arbitrage decision layer.
 - `election_arb_eda.py` — Week-3 exploratory data analysis and statistical tests. Merges the Claude extraction, WRDS ownership, and WRDS market outputs into a deal-level panel, then fits the empirical active-investor election function `p_active(spread)` with supporting plots and OLS/K-S tests.
 - `secapi_io_fulltext_ma_screen.py` — optional sec-api.io full-text helper.
-- `build_election_strategy_model.py` — colleague's local v1 merge/audit/strategy script. **Superseded for modeling by the `arb_*` Monte Carlo framework** (see `ARB_FRAMEWORK.md`); kept for reference.
 - `election_arb_eda.py` — exploratory data analysis and statistical tests. Merges the Claude extraction, WRDS ownership, and WRDS market outputs into a deal-level panel (`eda_output/merged_panel.csv`) used by the modeling layer.
 - `normalize_labels.py` — second-pass LLM normalization that separates election **demand** (`pct_elected_cash`) from post-proration **allocation**; writes `normalized_labels.csv` (73 clean demand labels).
 - `reextract_unresolved.py` — targeted re-extraction of specific deals with the sharpened prompt (batch or `--sync`); used to test and confirm the demand-disclosure ceiling.
 - `fix_acquirer_prices.py` — recovers missing acquirer prices caused by identifier drift (renames/delistings) by resolving PERMNO from the acquirer CUSIP; grew MC-ready deals 25 → 32.
 - `build_close_dates.py` — builds `target_close_dates.csv`, the authoritative CRSP delisting/close date per target, used to anchor realized-results (label) evidence selection.
 - `secapi_io_fulltext_ma_screen.py` — optional sec-api.io helper (**moved to `archive/alt_scripts/`**).
-- `audit_cik_resolution.py` — resolution-only audit ($0, EDGAR-only) of the name→CIK matcher across the deal universe; writes a score-sorted `cik_resolution_audit.csv` for review.
-- `build_cik_overrides.py` — finds and verifies correct CIKs for the recoverable resolver tail (delisted/renamed targets) by cross-checking each candidate's EDGAR filing history near the close date.
+- `cik_resolution.py` — CIK resolution tooling (EDGAR, $0), two subcommands: `audit` runs the name→CIK matcher across the universe → `cik_resolution_audit.csv`; `build-overrides` verifies correct CIKs for the recoverable tail (delisted/renamed targets) via EDGAR filing history near the close date. *(Merges the former `audit_cik_resolution.py` + `build_cik_overrides.py`.)*
 - `cik_manual_overrides.csv` — hand-verified name→CIK overrides, consulted before EDGAR full-text search.
-- `backfill_cusips.py`, `add_clean_ticker_cols.py` — one-time identifier prep that produced the clean `Target/Acquirer cusip` and `Ticker Clean` columns in the analysis input; consumed by the WRDS ownership/market stages (SEC retrieval itself is name-based and ignores them).
+- `prepare_input_identifiers.py` — builds the analysis file's identifier columns from a fresh BBG pull, two subcommands: `backfill-cusips` re-resolves US CUSIPs from CRSP stocknames (Excel corrupts the BBG column); `clean-tickers` adds `Target/Acquirer Ticker Clean` (strips " US", blanks placeholders). Consumed by the WRDS stages. *(Merges the former `backfill_cusips.py` + `add_clean_ticker_cols.py`.)*
 - `reference/` — canonical field/source map CSV, JSON, and Word document used to define which fields Claude should return and which source family each field belongs to.
 
 ### Monte Carlo model and trade layer (finalized prototype — see `ARB_FRAMEWORK.md`)
@@ -153,8 +150,8 @@ WRDS ownership and market scripts use these normalized columns by default, so th
 
 Merger targets are delisted post-acquisition, so the current-registrant ticker table (`company_tickers.json`) misses ~96% of them. Name→CIK resolution therefore uses **EDGAR full-text search** (`efts.sec.gov`, which indexes filers back to 2001) as the primary resolver, with `company_tickers.json` fuzzy matching as a fallback and a hand-verified override table on top:
 
-- `--cik-overrides cik_manual_overrides.csv` — trusted name→CIK overrides, consulted **before** efts (recovers delisted/renamed targets that fuzzy matching breaks or matches to the wrong entity). Build/verify candidates with `build_cik_overrides.py`.
-- `--min-name-score 90` — raise the fuzzy accept threshold to suppress wrong-company matches on generic names (e.g. bank/financial names). Audit the whole universe first with `audit_cik_resolution.py`.
+- `--cik-overrides cik_manual_overrides.csv` — trusted name→CIK overrides, consulted **before** efts (recovers delisted/renamed targets that fuzzy matching breaks or matches to the wrong entity). Build/verify candidates with `cik_resolution.py build-overrides`.
+- `--min-name-score 90` — raise the fuzzy accept threshold to suppress wrong-company matches on generic names (e.g. bank/financial names). Audit the whole universe first with `cik_resolution.py audit`.
 
 Realized-results (label) evidence is anchored on the deal **close date** so the terse results 8-K is preferred over the loud deal-announcement 8-K:
 
@@ -288,77 +285,6 @@ For backtesting, `event_market_features.csv` also includes entry/exit close prox
 - `exit_result_date`, `exit_target_price`, `exit_acquirer_price`
 
 Entry date is inferred from Claude source filing dates for pre-election mechanics. Exit date is inferred from final/realized proration result source dates. If those dates are missing, the script falls back and marks the fallback in `market_feature_notes`.
-
-## Model panel and risk-aware strategy signal
-
-After SEC/Claude, ownership, and market runs finish, build the local model panel and coverage audit:
-
-```bash
-python build_election_strategy_model.py \
-  --events ma_field_locator/candidate_events.csv \
-  --llm-extractions ma_field_locator_claude/llm_field_extractions.csv \
-  --ownership-mix ma_ownership_wrds/ownership_mix_by_event.csv \
-  --market-features ma_market_wrds/event_market_features.csv \
-  --output-dir ma_model_v1
-```
-
-This writes:
-
-- `model_input_panel.csv` — one row per event with legal terms, ownership, and market features merged.
-- `variable_coverage_report.csv` — available/missing/not-applicable status for each modeling field.
-- `election_model_predictions.csv` — rolling fitted structural election-demand prediction, independent deal-outcome probabilities, Monte Carlo proration/break risk metrics, and cap-aware trade/backtest rows.
-- `election_model_predictions_heuristic.csv` — archived v1 heuristic output for comparison.
-- `rolling_parameter_estimates.csv` — event-by-event fitted `p` and `q`, outcome fit counts/probabilities, and label-quality weights when realized election labels are available.
-- `election_backtest_trades.csv` — one row per event with trade/no-trade decision, completed/terminated/withdrawn probabilities, deterministic alpha, Monte Carlo net-alpha distribution, missed-arbitrage flag, loss flag, realized P&L, and proxy P&L.
-- `backtest_summary.json` — trade counts split into realized-label trades and proxy-only simulations, plus realized/proxy P&L summaries.
-- `model_run_summary.json` — compact run summary.
-
-The default structural model assumes zero borrow cost, uses a 1,000,000 dollar target long notional, sizes the acquirer short with `--own-hedge-policy conversion_expected`, and runs 2,000 Monte Carlo demand draws per event/election choice.  The fitted parameters are:
-
-- `p`: irrational investors' cash-election probability.
-- `q`: EV-sensitive rational investors' original target ownership share.
-
-The model rolls by prior labeled events, not by calendar time.  Realized labels come from Claude's `realized_cash_election_demand` / `realized_stock_election_demand` fields when available; final/proration text can be used as a lower-weight backed-out label; missing labels are excluded from fitting and reported separately as proxy-only simulation P&L.
-
-Deal-outcome model:
-
-The outcome model is independent of election/proration estimation. It trains on prior deals labeled completed, terminated, or withdrawn from `deal_completion_or_break` / deal-status fields, then uses only pre-outcome legal, ownership, and market fields. Election demand and proration are still estimated conditional on a successful close. The trade layer then maps outcome probabilities into state-adjusted net alpha:
-
-```text
-state_adjusted_alpha =
-  p_completed * close_alpha
-  + p_terminated * terminated_break_alpha
-  + p_withdrawn * withdrawn_break_alpha
-```
-
-To train the outcome model from data, run the upstream SEC/WRDS/market jobs on an all-status universe, not only completed deals. For example, use `--all-status` or include completed, terminated, and withdrawn statuses in the source export. If the rolling sample is too small, the strategy falls back to the configured default probabilities.
-
-Useful risk controls:
-
-```bash
-python build_election_strategy_model.py \
-  --events ma_field_locator/candidate_events.csv \
-  --llm-extractions ma_field_locator_claude/llm_field_extractions.csv \
-  --ownership-mix ma_ownership_wrds/ownership_mix_by_event.csv \
-  --market-features ma_market_wrds/event_market_features.csv \
-  --output-dir ma_model_risk \
-  --trade-decision-metric cvar05 \
-  --min-net-alpha 0.25 \
-  --min-p05-net-alpha -0.50 \
-  --max-loss-probability 0.25 \
-  --annual-borrow-cost-bps 50 \
-  --default-completed-prob 0.90 \
-  --default-terminated-prob 0.07 \
-  --default-withdrawn-prob 0.03 \
-  --terminated-break-loss-pct 0.25 \
-  --withdrawn-break-loss-pct 0.35
-```
-
-Monte Carlo output columns are prefixed by `cash_mc_` and `stock_mc_`, including net-alpha mean/p5/p50/p95/CVaR, fill-rate distributions, demand distributions, loss probability, and completed/terminated/withdrawn scenario contributions.
-The model rolls by prior labeled events, not by calendar time.  Realized labels come from Claude's `realized_cash_election_demand` / `realized_stock_election_demand` fields when available; missing labels are excluded from fitting.
-The finalized `arb_signal.py` capacity layer now consumes the same rolling structural idea
-directly: event-level `p_hat/q_hat` are estimated from prior disclosed events and written into
-`arb_signals.csv` as `capacity_holder_*` columns.
 
 ## Week-3 EDA and p_active(spread) fitting
 
