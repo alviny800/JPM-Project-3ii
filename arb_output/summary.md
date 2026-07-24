@@ -11,15 +11,15 @@
 
 ## 3. Realized-edge event study — DOES THE ALPHA EXIST?
 - 32 MC-ready deals. Proration-capture edge **100% positive**.
-- Median **1.66% of blended**, mean **7.71%** (right-skewed: usually small, occasionally large).
+- Median **1.4% of blended**, mean **2.49%** (right-skewed: usually small, occasionally large).
 
 ## 4. Portfolio Monte Carlo
 - Equal-weight 32 deals, 20,000 paths.
-- Proration edge (no break): mean **8.64%**.
-- With event-level completed/terminated/withdrawn probabilities averaging **20.3% terminated/withdrawn** (terminated loss 25%, withdrawn loss 35%): mean **1.33%**, 5th-pct **-3.22%** — the tail is deal-outcome risk, not election risk.
+- Proration edge (no break): mean **7.7%**.
+- With event-level completed/terminated/withdrawn probabilities averaging **20.3% terminated/withdrawn** (terminated loss 25%, withdrawn loss 35%): mean **0.56%**, 5th-pct **-3.76%** — the tail is deal-outcome risk, not election risk.
 
 ## Spread conditioning
-- logit(demand) slope on deadline spread = **+0.0227** (se 0.0402) → ~flat on our data. Framework supports conditioning; the data says the tilt is weak, so we MC over that slope's uncertainty rather than assert it.
+- logit(demand) slope on deadline spread = **+0.0423** (se 0.0414) → ~flat on our data. Framework supports conditioning; the data says the tilt is weak, so we MC over that slope's uncertainty rather than assert it.
 
 ## Honest scope / current coverage
 - **Demand distribution: solid (n=73).** Near the disclosure ceiling — no more recoverable from EDGAR (verified: 98% of no-label deals already had the 8-K pulled, the number just isn't disclosed).

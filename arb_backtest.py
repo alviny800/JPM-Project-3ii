@@ -44,6 +44,11 @@ def calibration_backtest(f_cash):
 def realized_edge(deals):
     d = deals.dropna(subset=["C", "R", "P_acq", "f_cash", "pi_cash"]).copy()
     d = d[d.ratio_type == "fixed"]
+    # drop deals with an implausible cash-vs-stock term gap (misparsed cash value / ratio / price);
+    # a >50% gap is a data artifact, not a real deadline spread. Matches the arb_signal REVIEW guard.
+    stock_val = d["R"] * d["P_acq"]
+    term_gap = (d["C"] - stock_val).abs() / np.minimum(d["C"].abs(), stock_val.abs()).clip(lower=1e-9)
+    d = d[term_gap <= 0.50]
     rows = []
     for _, r in d.iterrows():
         _, _, blended, optimal = prorate(r["f_cash"], r["pi_cash"], r["C"], r["R"] * r["P_acq"])

@@ -683,8 +683,20 @@ def build_signals(config=None):
         # anything outside that is almost certainly a bad entry price or misparsed term -> REVIEW,
         # never a tradeable signal. keeps the blotter honest by construction.
         data_quality_return = max(abs(arb_ret), abs(reverse_completion_return))
-        if data_quality_return > 0.30:
-            signal, size, signal_reason = "REVIEW", 0.0, "abs_completion_or_election_return_above_30pct"
+        # also flag an implausible cash-vs-stock TERM gap (misparsed cash value / ratio / acquirer
+        # identity or price): the return check above misses these when the misparse still lands the
+        # return inside +/-30% (e.g. REVERSE trades that settle at blended value). Check the gap at
+        # BOTH the entry and deadline acquirer prices — a real election is structured near cash/stock
+        # parity, so a >50% gap at entry is a misparse, and a >50% gap at the deadline is either a
+        # misparse (wrong acquirer/price) or basis risk large enough to warrant REVIEW.
+        entry_gap = abs(d.C - stock_val) / max(min(abs(d.C), abs(stock_val)), 1e-9)
+        deadline_sv = d.R * d.P_acq
+        deadline_gap = abs(d.C - deadline_sv) / max(min(abs(d.C), abs(deadline_sv)), 1e-9)
+        term_gap = max(entry_gap, deadline_gap)
+        if data_quality_return > 0.30 or term_gap > 0.50:
+            signal, size, signal_reason = "REVIEW", 0.0, (
+                "implausible_cash_vs_stock_term_gap" if term_gap > 0.50
+                else "abs_completion_or_election_return_above_30pct")
             selected = "REVIEW"
             selected_risk = long_risk if long_decision >= reverse_decision else reverse_risk
             selected_decision = max(long_decision, reverse_decision)

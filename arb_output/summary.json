@@ -5,20 +5,31 @@
   ],
   "demand_mean": 0.427,
   "demand_calibration_set": 73,
-  "spread_logit_slope": 0.0227,
-  "spread_logit_slope_se": 0.0402,
+  "spread_logit_slope": 0.0423,
+  "spread_logit_slope_se": 0.0414,
   "calibration_ks_p": 0.959,
   "calibration_pit_mean": 0.498,
   "calibration_in80": 0.795,
   "mc_ready_deals": 32,
-  "realized_edge_median_pct": 1.66,
-  "realized_edge_mean_pct": 7.71,
+  "realized_edge_median_pct": 1.4,
+  "realized_edge_mean_pct": 2.49,
   "realized_edge_pct_positive": 100.0,
-  "portfolio_edge_mean_pct": 8.64,
+  "portfolio_edge_mean_pct": 7.7,
   "portfolio_break_scenario": {
-    "p_break": 0.12,
-    "loss_frac": 0.25
+    "p_break": 0.2032,
+    "loss_frac": 0.269,
+    "source": "aggregate_view_of_event_outcome_probabilities"
   },
-  "portfolio_with_break_mean_pct": 4.63,
-  "portfolio_with_break_p05_pct": 0.32
+  "portfolio_outcome_scenario": {
+    "p_completed": 0.7968,
+    "p_terminated": 0.1649,
+    "p_withdrawn": 0.0383,
+    "terminated_loss_frac": 0.25,
+    "withdrawn_loss_frac": 0.35,
+    "source_counts": {
+      "external_outcome_probabilities_explicit_three_state": 32
+    }
+  },
+  "portfolio_with_break_mean_pct": 0.56,
+  "portfolio_with_break_p05_pct": -3.76
 }
