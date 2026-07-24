@@ -8,6 +8,7 @@ Runs the whole pipeline and writes figures + a summary to arb_output/:
 Figures:
   1 demand_distribution.png    empirical realized demand + fitted Beta (what the MC samples)
   2 calibration_pit.png        leave-one-out PIT histogram (is the model honest?)
+  2b beta_qq.png               Beta QQ plot (pooled goodness-of-fit; points on the 45° line = fit)
   3 realized_edge.png          per-deal proration-capture edge (event study B)
   4 portfolio_pnl.png          portfolio edge distribution, with an outcome-risk overlay
 Summary: arb_output/summary.md  (numbers + interpretation, ready to walk through)
@@ -58,6 +59,17 @@ def main():
     ax.set(xlabel="PIT = model CDF at realized demand", ylabel="count",
            title=f"Calibration backtest — KS p={cb['ks_p']:.2f}, {cb['pit_in_10_90']*100:.0f}% in 80% band")
     ax.legend(fontsize=8); fig.tight_layout(); fig.savefig(f"{OUT}/calibration_pit.png", dpi=130); plt.close(fig)
+
+    # ---- fig 2b: Beta QQ plot (pooled goodness-of-fit — points on the 45° line = good fit) ----
+    fq = np.sort(cal_sample)
+    pos = (np.arange(1, len(fq) + 1) - 0.5) / len(fq)          # plotting positions
+    theo = stats.beta.ppf(pos, model.a, model.b)              # BETA quantiles (works for any distribution)
+    fig, ax = plt.subplots(figsize=(6, 4))
+    ax.scatter(theo, fq, s=20, color="#4C78A8", zorder=3)
+    ax.plot([0, 1], [0, 1], "--", color="#E15759", lw=1.5, label="perfect fit (45°)")
+    ax.set(xlabel=f"theoretical quantile — Beta({model.a:.2f}, {model.b:.2f})",
+           ylabel="observed demand quantile", title="Beta QQ plot — points on the line = good fit")
+    ax.legend(fontsize=8); fig.tight_layout(); fig.savefig(f"{OUT}/beta_qq.png", dpi=130); plt.close(fig)
 
     # ---- B realized edge + fig 3 ----
     re = realized_edge(d)
