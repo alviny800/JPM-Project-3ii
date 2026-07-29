@@ -894,6 +894,20 @@ def build_signals(config=None):
     if not out.empty:
         out = out.sort_values("E_return_%", ascending=False)
     out.to_csv(cfg.output_path, index=False)
+    # also emit a compact, presentation-ready view. The full file above is the audit-trail
+    # appendix (all 100+ diagnostic columns); this is the ~13-column view a human reads. Pure
+    # projection, so it can never disagree with the full blotter. Headline return is E_return_%
+    # = the SELECTED direction (long for ENTER / reverse for REVERSE), NOT arb_return_% (which is
+    # always the long-side view and reads negative on REVERSE trades).
+    clean_cols = {
+        "target": "target", "signal": "signal", "elect": "elect", "M": "entry",
+        "fair_value": "fair_val", "E_return_%": "exp_ret%", "downside_5%_%": "p05%",
+        "loss_probability_%": "loss_prob%", "hedge_side": "hedge", "hedge_ratio": "hedge_ratio",
+        "size_x": "size", "capacity_notional": "notional_$", "realized_return_%": "realized%",
+    }
+    present = [c for c in clean_cols if c in out.columns]
+    clean_path = cfg.output_path.replace(".csv", "_clean.csv")
+    out[present].rename(columns=clean_cols).to_csv(clean_path, index=False)
     return out
 
 
@@ -1002,6 +1016,93 @@ def _json_ready(value):
     return value
 
 
+def _risk_adjusted_block(trades):
+    """Cross-sectional (per-trade) risk-adjusted performance on REALIZED returns of the traded book.
+    Reports equal-weighted mean/median/std, cross-sectional Sharpe (mean/std) and Sortino
+    (mean/downside-std), split by ENTER vs REVERSE, plus an ex-largest-winner sensitivity.
+    CAVEAT: the universe is completed-only, so there are no losers -> these are UPPER BOUNDS, not
+    tradeable Sharpe ratios (see future work: terminated-deal backtest)."""
+    def _stats(x):
+        x = pd.to_numeric(x, errors="coerce").dropna()
+        if len(x) < 1:
+            return {"n": 0}
+        std = float(x.std())
+        downside = x[x < x.mean()]
+        dstd = float(downside.std()) if len(downside) > 1 else float("nan")
+        return {
+            "n": int(len(x)),
+            "mean_%": round(float(x.mean()), 2),
+            "median_%": round(float(x.median()), 2),
+            "std_%": round(std, 2),
+            "min_%": round(float(x.min()), 2),
+            "max_%": round(float(x.max()), 2),
+            "cross_sectional_sharpe": round(float(x.mean() / std), 2) if std > 0 else None,
+            "sortino": round(float(x.mean() / dstd), 2) if np.isfinite(dstd) and dstd > 0 else None,
+        }
+    sig = trades["signal"].astype(str)
+    r = _numeric(trades, "realized_return_%").dropna()
+    ex = r.drop(r.idxmax()) if len(r) > 1 else r          # drop the single biggest realized winner
+    return {
+        "note": ("cross-sectional (per-trade) on realized returns; SURVIVORSHIP-BIASED "
+                 "(completed-only universe, no losers) -> upper bound, not a tradeable Sharpe"),
+        "all_trades": _stats(r),
+        "enter": _stats(_numeric(trades[sig.eq("ENTER")], "realized_return_%")),
+        "reverse": _stats(_numeric(trades[sig.eq("REVERSE")], "realized_return_%")),
+        "all_ex_largest_winner": _stats(ex),
+    }
+
+
+def _render_risk_png(rap, out_path="arb_output/risk_performance.png"):
+    """Render the risk_adjusted_performance block as a deck-ready table PNG. Lazy matplotlib import
+    so arb_signal.py stays importable without a plotting backend."""
+    order = [("all_trades", "All trades"), ("enter", "ENTER"),
+             ("reverse", "REVERSE"), ("all_ex_largest_winner", "Ex-top winner")]
+    cols = [("n", "n"), ("mean_%", "Mean %"), ("median_%", "Median %"),
+            ("std_%", "Std"), ("cross_sectional_sharpe", "Sharpe"), ("sortino", "Sortino")]
+
+    def _fmt(v):
+        if v is None or (isinstance(v, float) and not np.isfinite(v)):
+            return "—"
+        return f"{v:g}"
+
+    labels, rows = [], []
+    for k, lbl in order:
+        s = rap.get(k) if isinstance(rap.get(k), dict) else None
+        if not s or not s.get("n"):
+            continue
+        labels.append(lbl)
+        rows.append([_fmt(s.get(c)) for c, _ in cols])
+    if not rows:
+        return
+    try:
+        import os
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except Exception:
+        return
+    os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+    INK = "#003057"
+    fig, ax = plt.subplots(figsize=(7.4, 1.1 + 0.5 * len(rows)))
+    ax.axis("off")
+    tbl = ax.table(cellText=rows, rowLabels=labels,
+                   colLabels=[c[1] for c in cols], loc="center", cellLoc="center")
+    tbl.auto_set_font_size(False)
+    tbl.set_fontsize(11)
+    tbl.scale(1, 1.7)
+    for j in range(len(cols)):
+        tbl[0, j].set_facecolor(INK)
+        tbl[0, j].set_text_props(color="white", weight="bold")
+    ax.set_title("Risk-adjusted performance — realized trades (cross-sectional)",
+                 fontsize=13, weight="bold", color=INK, pad=16)
+    fig.text(0.5, 0.03, "Survivorship-biased (completed-only universe, no losers) "
+             "→ upper bound, not a tradeable Sharpe",
+             ha="center", fontsize=8, style="italic", color="#434545")
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
 def summarize_strategy(out, output_path="arb_strategy_summary.json"):
     """Summarize ENTER and REVERSE as one combined arbitrage book."""
     if out is None or out.empty or "signal" not in out.columns:
@@ -1071,6 +1172,7 @@ def summarize_strategy(out, output_path="arb_strategy_summary.json"):
                     "selected marginal realized return already printed in arb_signals.csv."
                 ),
             },
+            "risk_adjusted_performance": _risk_adjusted_block(trades),
             "proof": {
                 "long_self_impact_can_eliminate_count": int(
                     out.get("self_impact_can_eliminate_arbitrage", pd.Series(False, index=out.index)).fillna(False).sum()
@@ -1121,6 +1223,7 @@ def summarize_strategy(out, output_path="arb_strategy_summary.json"):
         path.write_text(json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8")
         csv_path = path.with_suffix(".csv")
         pd.json_normalize(summary, sep=".").to_csv(csv_path, index=False)
+        _render_risk_png(summary.get("risk_adjusted_performance", {}))
     return summary
 
 
