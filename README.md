@@ -326,8 +326,6 @@ deal_outcome_model.py        shared outcome helpers for structural model
 arb_capacity.py              Stage 7-8 capacity helpers
 arb_signal.py                Stage 5-10 decisions and historical P&L
 material_builder.py          disposable presentation-output exporter
-
-docs/                        current human-readable deliverables
 ```
 
 The stage modules are the implementation and unit-test surface.
@@ -379,10 +377,6 @@ python3 arb_pipeline.py fast
 - Private/foreign acquirers and incomplete common price histories remain outside
   the fully hedged historical sample.
 
-## Documentation
+## Model Reference
 
 - [ARB_FRAMEWORK.md](ARB_FRAMEWORK.md): model mechanics and validation scope.
-- [Updated project report](docs/JPM_Project_3ii_Report_Updated.docx): current
-  text-only Stage 0-10 report.
-- [Bilingual Stage 4-10 speaker script](docs/Stage4-Stage10_Bilingual_Speaker_Script.docx).
-- [Speaker-script source](docs/stage4_to_stage10_speaker_script_5_7min.md).
