@@ -32,7 +32,7 @@ os.makedirs(OUT, exist_ok=True)
 RNG = np.random.default_rng(20260716)
 
 
-def main():
+def main(write_material=True):
     d = arb_terms.build_deals()
     cal_sample = d["f_cash"].dropna().values
     spr = d.dropna(subset=["f_cash", "spread"])
@@ -186,13 +186,14 @@ def main():
 - The realized election-edge backtest remains the completed-election universe because terminated/withdrawn deals do not have final proration/election outcomes. Their effect enters the trade and portfolio layers through the event-level outcome probabilities.
 """
     open(f"{OUT}/summary.md", "w").write(md)
-    try:
-        from material_builder import export_after_arb_run
-        material_results = export_after_arb_run()
-        print("[material] wrote MC slide material to material/")
-        print(json.dumps(material_results, indent=2))
-    except Exception as exc:
-        print(f"[material] skipped MC material export: {exc}")
+    if write_material:
+        try:
+            from material_builder import export_after_arb_run
+            material_results = export_after_arb_run()
+            print("[material] wrote MC slide material to material/")
+            print(json.dumps(material_results, indent=2))
+        except Exception as exc:
+            print(f"[material] skipped MC material export: {exc}")
     print("[run] wrote figures + summary to", OUT)
     print(json.dumps(S, indent=2))
 

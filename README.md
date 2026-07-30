@@ -1,37 +1,41 @@
 # Cash-or-Stock Election Arbitrage
 
-This repository models cash-or-stock merger elections from raw deal terms through
-trade sizing and historical strategy diagnostics.
+This repository contains the canonical Stage 0-10 research pipeline for
+cash-or-stock merger elections. It starts with the Bloomberg deal universe,
+rebuilds SEC/WRDS inputs when credentials are available, estimates election
+demand and deal-outcome risk, constructs ENTER/REVERSE decisions, sizes the
+trades, and reconstructs historical target/acquirer hedged P&L.
 
-In these deals, target shareholders choose cash or stock, but aggregate cash and
-stock pools are capped. The average holder receives the fixed blended
-consideration. A holder who elects the richer, under-subscribed side can receive
-more than that average. The project estimates that proration-capture edge, applies
-deal-outcome risk, converts it into ENTER/REVERSE/PASS decisions, sizes the trades,
-and reconstructs daily hedged P&L.
+The repository intentionally tracks only:
 
-Current reference run:
+- current source code;
+- lightweight configuration and reviewed public mappings;
+- the normalized public election-demand labels;
+- tests and current documentation.
 
-- 73 disclosed election-demand labels
-- 32 Monte Carlo-ready deals
-- 88 priced signals: 10 ENTER, 10 REVERSE, 20 REVIEW, 48 PASS-family
-- $621.4 million aggregate target-leg opportunity notional
-- $39.9 million ex-ante expected P&L, or 6.42% of opportunity notional
-- 18/20 reconstructed daily paths
-- Active-position Sharpe 1.08 and Sortino 3.07
-- Full-calendar Sharpe 0.45 and Sortino 1.27
+Licensed/local source data and reproducible generated outputs are gitignored.
+Running the pipeline creates `arb_output/`, `material/`, and the root-level
+working CSV/JSON files.
 
-The numerical results above describe the current local licensed-data run. See
-[ARB_FRAMEWORK.md](ARB_FRAMEWORK.md) for the modeling assumptions and limitations.
+## Current Reference Run
 
-## Start Here
+The latest local licensed-data run produces:
 
-There are two ways to run the project.
+- 73 disclosed election-demand labels;
+- 32 Monte Carlo-ready deals;
+- temporal outcome-model Brier score 0.307 versus 0.317 prior-only;
+- 88 priced signals: 10 ENTER, 10 REVERSE, 20 REVIEW, 48 PASS-family;
+- $621.4 million optimal target-leg notional;
+- $39.9 million expected P&L, or 6.42% of opportunity notional;
+- 16 direct realized-settlement validations;
+- 18 of 20 reconstructed daily trade paths;
+- active-position Sharpe 1.08 and Sortino 3.07;
+- full-calendar Sharpe 0.45 and Sortino 1.27.
 
-### Rebuild from the existing local data
+These are reference diagnostics, not committed data artifacts. Rebuild them
+from the standard local inputs described below.
 
-Use this path for normal research, code changes, result refreshes, and slide work.
-It does not call WRDS, SEC, or an LLM.
+## Quick Start
 
 ```bash
 git clone https://github.com/alviny800/JPM-Project-3ii.git
@@ -39,215 +43,113 @@ cd JPM-Project-3ii
 
 python3 -m venv .venv
 source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
+python3 -m pip install --upgrade pip
+python3 -m pip install -r requirements.txt
 
-# Copy the seven local inputs listed below into their standard paths first.
-python arb_pipeline.py check
-python arb_pipeline.py fast
+python3 arb_pipeline.py check
+python3 arb_pipeline.py fast
 ```
 
-`fast` runs the complete reproducible analytics chain:
+`arb_pipeline.py` is the only orchestration entry point. `fast` runs each
+offline analytics layer once and regenerates the presentation material at the
+end:
 
 ```text
-outcome probabilities
-  -> deadline terms and demand Monte Carlo
-  -> calibration and realized-edge diagnostics
+deadline terms
+  -> all-status outcome probabilities
+  -> demand calibration and proration Monte Carlo
   -> risk gates and ENTER/REVERSE decisions
   -> holder structure and capacity
+  -> realized settlement diagnostics
   -> historical daily strategy results
-  -> slide-ready material
+  -> material/
 ```
 
-To refresh only the presentation assets after the model outputs already exist:
+## Stage 0-10 Map
 
-```bash
-python arb_pipeline.py material
-```
+| Stage | Layer | Purpose | Current source | Main output |
+|---:|---|---|---|---|
+| 0 | Universe and identifiers | Review the Bloomberg universe and resolve historical CUSIP/ticker identities | `prepare_input_identifiers.py`, `cik_resolution.py` | reviewed election universe, CIK/CUSIP audits |
+| 1 | SEC, market, and labels | Extract contractual terms and realized elections; download prices/ownership; normalize labels | `download_ma_edgar_files.py`, `download_wrds_market_data.py`, `download_ownership_etf_data.py`, `normalize_labels.py`, `election_arb_eda.py` | local SEC/WRDS files, `normalized_labels.csv`, merged panel |
+| 2 | Demand distribution | Fit pooled Beta election demand and test calibration | `arb_mc.py`, `arb_backtest.py` | demand model and PIT diagnostics |
+| 3 | Proration Monte Carlo | Apply deal terms and three-state outcome probabilities to simulated demand | `arb_terms.py`, `arb_run.py` | `arb_deals.csv`, `arb_output/` |
+| 4 | Deal outcome | Estimate completed/terminated/withdrawn probabilities with temporally tuned Naive Bayes | `arb_outcome.py` | `deal_outcome_probabilities.csv` |
+| 5 | Payoff overlay | Convert completion, termination, and withdrawal into return distributions | `arb_mc.py`, `arb_signal.py` | state-weighted payoff statistics |
+| 6 | Risk-gated decisions | Choose ENTER, REVERSE, REVIEW, or PASS | `arb_signal.py` | `arb_signals.csv` |
+| 7 | Holder structure | Estimate rolling noisy/EV-sensitive holder parameters | `structural_election_model.py`, `arb_capacity.py` | event-level p/q estimates |
+| 8 | Capacity and self-impact | Apply supply, borrow, ADV, position, and proration-impact limits | `arb_capacity.py`, `arb_signal.py` | optimal/max capacity and expected P&L |
+| 9 | Settlement validation | Compare expected payoffs with directly reconstructable completed settlements | `arb_signal.py` | realized-return diagnostics |
+| 10 | Historical strategy | Reconstruct capacity-weighted daily target/acquirer hedged returns | `arb_signal.py` | daily/event return files and Sharpe/Sortino |
 
-Do not run `material_builder.py --help`. It is a build module, not a CLI; execute
-it through `arb_pipeline.py material`.
-
-### Rebuild the raw data
-
-Use this path only when the Bloomberg universe, SEC extraction, or WRDS data must
-be replaced. These steps require licensed data, credentials, API access, and
-manual identifier review. They are intentionally separate from the normal
-offline rebuild.
-
-Follow [Full Data Build](#full-data-build), then return to:
-
-```bash
-python arb_pipeline.py check
-python arb_pipeline.py fast
-```
+The conceptual stage order and execution order differ slightly: Stage 4
+probabilities are generated before the Stage 3 portfolio overlay because the
+Monte Carlo consumes those probabilities.
 
 ## Standard Local Inputs
 
-The public repository does not contain Bloomberg or CRSP source data. Place the
-following files at these exact paths before running `fast`.
+`python3 arb_pipeline.py check` validates these exact paths and required columns:
 
-| Path | Purpose | Produced by |
+| Path | Purpose | How it is produced |
 |---|---|---|
-| `BBG Data Pull 2006+ Final.csv` | All-status outcome-model training data | Bloomberg export |
-| `ma_edgar_full/llm_field_extractions.csv` | Deal terms, caps, election deadlines, realized election disclosures | `download_ma_edgar_files.py` |
-| `ma_market_wrds/wrds_market_daily.csv` | Target/acquirer prices, volume, and daily paths | `download_wrds_market_data.py` plus `fix_acquirer_prices.py` |
-| `ma_market_wrds/event_security_map.csv` | Event-to-security identifiers | `download_wrds_market_data.py` |
-| `target_close_dates.csv` | CRSP close-date fallback | `build_close_dates.py` |
-| `normalized_labels.csv` | Clean cash-election demand labels | `normalize_labels.py` |
-| `eda_output/merged_panel.csv` | Event panel used by capacity and diagnostics | `election_arb_eda.py` |
+| `BBG Data Pull 2006+ Final.csv` | all-status outcome-model training data | licensed Bloomberg export |
+| `ma_edgar_full/llm_field_extractions.csv` | contractual terms, election deadlines, realized disclosures | `download_ma_edgar_files.py` |
+| `ma_market_wrds/wrds_market_daily.csv` | target/acquirer prices, volume, and daily paths | `download_wrds_market_data.py`, then `fix_acquirer_prices.py` |
+| `ma_market_wrds/event_security_map.csv` | event-to-security identifiers | `download_wrds_market_data.py` |
+| `target_close_dates.csv` | close-date fallback | `build_close_dates.py` |
+| `normalized_labels.csv` | clean cash-election demand labels | `normalize_labels.py` |
+| `eda_output/merged_panel.csv` | capacity and diagnostic event panel | `election_arb_eda.py` |
 
-The preflight command checks that every file exists and contains its required
-columns:
+All licensed or large inputs are local and gitignored. `normalized_labels.csv`
+is the only small, reviewed analytic input committed to the repository.
 
-```bash
-python arb_pipeline.py check
-```
+## Normal Offline Rebuild
 
-## End-to-End Pipeline
-
-The table below is the canonical run order. "Normal rerun" means the step is part
-of `python arb_pipeline.py fast`; "data refresh" means it is only needed when raw
-inputs change.
-
-| Order | Layer | Main command | Why it exists | Primary output | When to run |
-|---:|---|---|---|---|---|
-| 1 | Universe and identifiers | `prepare_input_identifiers.py` | Repairs tickers/CUSIPs and creates auditable security identifiers | resolved universe and CUSIP audit | data refresh |
-| 2 | SEC identity audit | `cik_resolution.py` | Resolves target names to SEC CIKs and maintains verified overrides | `cik_manual_overrides.csv` | data refresh |
-| 3 | SEC and LLM extraction | `download_ma_edgar_files.py` | Downloads merger filings and extracts the 17 canonical fields | `ma_edgar_full/llm_field_extractions.csv` | data refresh |
-| 4 | Market and ownership data | WRDS download scripts | Retrieves prices, volume, identifiers, and ownership proxies | `ma_market_wrds/`, `ma_ownership_wrds/` | data refresh |
-| 5 | Price repair and close dates | `fix_acquirer_prices.py`, `build_close_dates.py` | Corrects identifier collisions and anchors historical close dates | corrected daily prices, `target_close_dates.csv` | data refresh |
-| 6 | Label normalization | `normalize_labels.py` | Separates election demand from post-proration allocation | `normalized_labels.csv` | data refresh |
-| 7 | Merged analysis panel | `election_arb_eda.py` | Joins extracted terms, market, ownership, and normalized labels | `eda_output/merged_panel.csv` | data refresh |
-| 8 | Deadline spread | `deadline_spread.py` | Prices the cash-versus-stock choice at the election deadline | `deadline_spread.csv` | normal rerun |
-| 9 | Outcome overlay | `arb_pipeline.py outcome` | Produces completed/terminated/withdrawn probabilities | `deal_outcome_probabilities.csv` | normal rerun |
-| 10 | Terms and Monte Carlo | `arb_pipeline.py mc` | Fits demand, applies proration, and validates the edge | `arb_deals.csv`, `arb_output/` | normal rerun |
-| 11 | Signal and capacity | `arb_pipeline.py signal` | Applies risk gates, holder structure, liquidity, borrow, and self-impact | `arb_signals.csv`, strategy summaries | normal rerun |
-| 12 | Historical strategy | included in signal | Reconstructs daily target/acquirer hedged P&L | daily/event return CSVs | normal rerun |
-| 13 | Presentation material | `arb_pipeline.py material` | Exports stable tables, figures, metrics, and charts | `material/` | normal rerun |
-
-## Normal Rebuild, Step by Step
-
-The consolidated commands are preferred because they keep the run order and
-default file paths consistent.
+Use this path for code changes, model reruns, and refreshed presentation
+material. It does not call Bloomberg, WRDS, SEC, or an LLM.
 
 ### 1. Validate inputs
 
 ```bash
-python arb_pipeline.py check
+python3 arb_pipeline.py check
 ```
 
-This checks the seven standard local inputs and fails before expensive work if a
-file or required column is missing.
+The command fails before model work if a standard file or required column is
+missing.
 
-### 2. Build the outcome model
+### 2. Run everything
 
 ```bash
-python arb_pipeline.py outcome
+python3 arb_pipeline.py fast
 ```
 
-Purpose:
+The command performs:
 
-- trains the completed/terminated/withdrawn Naive Bayes model on all-status
-  Bloomberg labels;
-- tunes hyperparameters using expanding-year validation;
-- writes event-level probabilities for downstream Monte Carlo;
-- exports outcome-model performance material.
+1. `deadline_spread.py`;
+2. temporally tuned three-state outcome probabilities;
+3. deal-term assembly, demand calibration, and proration Monte Carlo;
+4. risk gates, trade direction, holder structure, capacity, and self-impact;
+5. settlement and daily-path strategy diagnostics;
+6. one final `material/` export.
 
-Output:
-
-- `deal_outcome_probabilities.csv`
-- `material/01_outcome_*`
-
-The 293-event deployment frame is completion-only and is not used as the
-three-class test set. Temporal out-of-sample evaluation uses 812 all-status
-observations from 2016-2026.
-
-### 3. Build deadline terms and run Monte Carlo
+### 3. Run a layer in isolation
 
 ```bash
-python deadline_spread.py
-python arb_pipeline.py mc
+python3 arb_pipeline.py outcome
+python3 arb_pipeline.py mc
+python3 arb_pipeline.py signal
+python3 arb_pipeline.py material
 ```
 
-Purpose:
-
-- resolves the election deadline or close-date fallback;
-- prices cash and stock consideration at that date;
-- excludes floating ratios from fixed-ratio spread inference;
-- fits the Beta election-demand distribution;
-- runs leave-one-out calibration and the realized-edge event study;
-- simulates completed, terminated, and withdrawn payoff paths.
-
-Output:
-
-- `deadline_spread.csv`
-- `arb_deals.csv`
-- `arb_output/summary.json`
-- `arb_output/summary.md`
-- `arb_output/*.png`
-- `material/00_mc_*`
-
-`arb_pipeline.py fast` invokes this deadline-spread rebuild before the outcome,
-Monte Carlo, and signal layers. Running it explicitly is useful when debugging
-the terms layer in isolation.
-
-### 4. Build signals, capacity, and historical P&L
-
-```bash
-python arb_pipeline.py signal \
-  --outcome-probs deal_outcome_probabilities.csv
-```
-
-Purpose:
-
-- evaluates ENTER and REVERSE payoffs under the three-state outcome distribution;
-- applies expected-return, fifth-percentile, and loss-probability gates;
-- sends inconsistent terms to REVIEW and weak opportunities to PASS;
-- estimates rolling holder parameters `p` and `q`;
-- limits ENTER capacity by sellers, ADV, position size, and proration self-impact;
-- limits REVERSE capacity by borrow, ADV, position size, and noisy-buyer demand;
-- reconstructs capacity-weighted daily target/acquirer hedged returns.
-
-Output:
-
-- `arb_signals.csv`
-- `arb_signals_clean.csv`
-- `arb_strategy_summary.json`
-- `arb_strategy_summary.csv`
-- `arb_strategy_daily_returns.csv`
-- `arb_strategy_event_daily_returns.csv`
-- `material/02_holder_*` through `material/06_strategy_result_*`
-
-### 5. Refresh presentation artifacts
-
-```bash
-python arb_pipeline.py material
-python build_walkthrough.py
-```
-
-Purpose:
-
-- collects each layer's important outputs and performance metrics;
-- produces stable CSV/JSON tables and presentation-ready PNG charts;
-- rebuilds the standalone HTML walkthrough.
-
-Output:
-
-- `material/material_manifest.md`
-- `material/material_index.csv`
-- `material/*.csv`, `material/*.json`, `material/*.png`
-- `arb_output/walkthrough.html`
-
-The bilingual DOCX/PDF speaker scripts are versioned presentation deliverables
-stored in `material/`; `material_builder.py` does not regenerate those two files.
+Layer commands are for debugging. A normal rebuild should use `fast` so paths
+and execution order remain consistent.
 
 ## Full Data Build
 
-The commands in this section are expensive or credentialed. Review every audit
-file before moving to the next step.
+Run this only when the Bloomberg universe, SEC extraction, CRSP market data, or
+ownership data must be replaced. It requires licensed data, credentials, API
+access, and manual audit.
 
-### 1. Install credentials
+### 1. Credentials
 
 ```bash
 export WRDS_USERNAME="your_wrds_username"
@@ -255,133 +157,118 @@ export ANTHROPIC_API_KEY="your_anthropic_api_key"
 export SEC_USER_AGENT="Your Name your.email@example.com"
 ```
 
-Do not store passwords or API keys in the repository.
+Never store credentials in the repository.
 
-### 2. Prepare the Bloomberg universe and CRSP identifier cache
+### 2. Bloomberg universe and historical identifiers
 
-Place the licensed Bloomberg export at:
+Place the Bloomberg export at:
 
 ```text
 BBG Data Pull 2006+ Final.csv
 ```
 
-Download the CRSP stock-name table once:
+Download the CRSP security-name history:
 
 ```bash
-python prepare_input_identifiers.py backfill-cusips \
+python3 prepare_input_identifiers.py backfill-cusips \
   --input "BBG Data Pull 2006+ Final.csv" \
   --dump-stocknames \
   --wrds-username "$WRDS_USERNAME"
 ```
 
-Run the offline identifier reconciliation:
+Build the reviewed election subset:
 
 ```bash
-python prepare_input_identifiers.py backfill-cusips \
+python3 prepare_input_identifiers.py backfill-cusips \
   --input "BBG Data Pull 2006+ Final.csv" \
   --out-dir cusip_backfill \
   --election-only
 ```
 
-Review:
-
-- `cusip_backfill/cusip_backfill_audit.csv`
-- `cusip_backfill/cusip_needs_review.csv`
-
-The research universe used downstream is the reviewed US cash-or-stock election
-subset, stored locally as `US_election_deals_for_analysis.csv`. This review gate
-is intentional: delisted securities and historical ticker reuse cannot be made
-fully reliable from a current ticker alone.
-
-Clean the ticker helper columns:
+Review the generated CUSIP audit and unresolved rows. The downstream reviewed
+universe is stored locally as `US_election_deals_for_analysis.csv`.
 
 ```bash
-python prepare_input_identifiers.py clean-tickers \
+python3 prepare_input_identifiers.py clean-tickers \
   --input US_election_deals_for_analysis.csv
 ```
 
-### 3. Audit CIK resolution
+### 3. SEC CIK audit
 
 ```bash
-python cik_resolution.py audit --user-agent "$SEC_USER_AGENT"
-python cik_resolution.py build-overrides --user-agent "$SEC_USER_AGENT"
+python3 cik_resolution.py audit --user-agent "$SEC_USER_AGENT"
+python3 cik_resolution.py build-overrides --user-agent "$SEC_USER_AGENT"
 ```
 
-Review candidate CIKs before updating the committed
-`cik_manual_overrides.csv`.
+Review candidates before changing the committed `cik_manual_overrides.csv`.
 
-### 4. Build the close-date anchor
+### 4. Close-date fallback
 
 ```bash
-python build_close_dates.py \
+python3 build_close_dates.py \
   --input US_election_deals_for_analysis.csv \
   --stocknames stocknames_cache.csv \
   --out target_close_dates.csv
 ```
 
-This uses the CRSP security-name validity endpoint as the close-date fallback.
-No additional WRDS query is required.
-
-### 5. Download SEC filings and extract fields
+### 5. SEC download and LLM field extraction
 
 ```bash
-python download_ma_edgar_files.py \
+python3 download_ma_edgar_files.py \
   --input US_election_deals_for_analysis.csv \
   --output-dir ma_edgar_full \
   --user-agent "$SEC_USER_AGENT" \
   --cik-overrides cik_manual_overrides.csv \
   --close-dates target_close_dates.csv \
+  --field-specs field_specs.json \
   --llm-stage batch \
   --max-batch-cost-usd 80
 ```
 
-This stage writes the SEC manifest, field-locator diagnostics, and
-`ma_edgar_full/llm_field_extractions.csv`. The raw filing directory can exceed
-40 GB and is gitignored.
+The canonical output is
+`ma_edgar_full/llm_field_extractions.csv`. Raw filings, caches, request payloads,
+and API response logs remain local.
 
-### 6. Download WRDS market and ownership data
+### 6. WRDS market and ownership data
 
 ```bash
-python download_wrds_market_data.py \
+python3 download_wrds_market_data.py \
   --input US_election_deals_for_analysis.csv \
   --output-dir ma_market_wrds \
   --wrds-username "$WRDS_USERNAME" \
   --llm-extractions ma_edgar_full/llm_field_extractions.csv
 
-python download_ownership_etf_data.py \
+python3 download_ownership_etf_data.py \
   --input US_election_deals_for_analysis.csv \
   --output-dir ma_ownership_wrds \
   --provider wrds \
   --wrds-username "$WRDS_USERNAME"
 ```
 
-If the installed WRDS client requests a password interactively, use the
-corresponding `--wrds-password-stdin` option.
-
-Apply the known price corrections after the market pull:
+Apply the reviewed historical security overrides:
 
 ```bash
-python fix_acquirer_prices.py
+python3 fix_acquirer_prices.py
 ```
 
-`fix_acquirer_prices.py` includes explicit PERMNO overrides for the known
-Isle/MTR acquirer collision and Sirius target collision.
+The overrides correct the Isle/MTR acquirer collision and the Sirius target
+collision.
 
-### 7. Normalize labels
+### 7. Normalize election-demand labels
 
 ```bash
-python normalize_labels.py \
+python3 normalize_labels.py \
   --extractions ma_edgar_full/llm_field_extractions.csv \
   --out normalized_labels.csv
 ```
 
-This is a small second LLM pass. It distinguishes shares that holders
-**elected** from shares they ultimately **received after proration**.
+This separates the fraction shareholders **elected** from the shares they
+ultimately **received after proration**.
 
-### 8. Build the merged panel
+### 8. Build the merged event panel
 
 ```bash
-python election_arb_eda.py \
+python3 election_arb_eda.py \
   --extractions ma_edgar_full/llm_field_extractions.csv \
   --ownership ma_ownership_wrds/ownership_mix_by_event.csv \
   --market ma_market_wrds/event_market_features.csv \
@@ -389,99 +276,113 @@ python election_arb_eda.py \
   --output-dir eda_output
 ```
 
-Then run the normal rebuild:
+Finish with the normal offline rebuild:
 
 ```bash
-python arb_pipeline.py check
-python arb_pipeline.py fast
+python3 arb_pipeline.py check
+python3 arb_pipeline.py fast
 ```
+
+## Output Lifecycle
+
+Generated artifacts are intentionally not tracked:
+
+| Path | Contents |
+|---|---|
+| `arb_output/` | MC summary, calibration/edge figures, and native model outputs |
+| `material/` | Stage 2-10 slide-ready CSV/JSON/PNG exports and manifest |
+| `arb_deals.csv` | assembled deterministic deal terms |
+| `deal_outcome_probabilities.csv` | Stage 4 event probabilities |
+| `arb_signals.csv` | complete risk-gated blotter |
+| `arb_strategy_summary.json` | strategy, capacity, realized, and historical metrics |
+| `arb_strategy_daily_returns.csv` | portfolio daily return series |
+| `arb_strategy_event_daily_returns.csv` | event-level daily return series |
+
+Delete any of these files safely and rerun `python3 arb_pipeline.py fast`.
 
 ## Code Layout
 
 ```text
-arb_pipeline.py              preferred consolidated CLI
-arb_outcome.py               outcome probability model
-arb_terms.py                 deterministic deal-term table
-arb_mc.py                    election-demand and proration engine
-arb_backtest.py              demand calibration and realized-edge tests
-arb_capacity.py              holder structure and capacity helpers
-arb_signal.py                risk gates, sizing, blotter, daily P&L
-structural_election_model.py rolling p/q holder model
-material_builder.py          slide-material exporters
+arb_pipeline.py              canonical Stage 0-10 CLI and run order
 
-download_*.py                external data acquisition
-prepare_input_identifiers.py identifier preparation
-cik_resolution.py            SEC identity audit
-normalize_labels.py          realized-demand normalization
-election_arb_eda.py          merged panel and EDA
-deadline_spread.py           election-deadline pricing
+prepare_input_identifiers.py Stage 0 Bloomberg/CUSIP preparation
+cik_resolution.py            Stage 0 SEC identity audit
+build_close_dates.py         Stage 1 close-date fallback
+download_ma_edgar_files.py   Stage 1 SEC retrieval and LLM extraction
+download_wrds_market_data.py Stage 1 market/security data
+download_ownership_etf_data.py Stage 1 ownership/ETF data
+event_csv_adapter.py         shared event-file normalization
+fix_acquirer_prices.py       reviewed historical price corrections
+normalize_labels.py          election-demand label normalization
+election_arb_eda.py          merged event panel
 
-arb_output/                  tracked high-level model figures and walkthrough
-material/                    tracked slide-ready tables, metrics, charts, scripts
-reference/                   field definitions and source maps
+arb_terms.py                 deterministic deal-term assembly
+arb_mc.py                    demand and proration engine
+arb_backtest.py              calibration and realized-edge tests
+arb_run.py                   Stage 2-3 MC driver
+arb_outcome.py               Stage 4 temporal Naive Bayes
+structural_election_model.py Stage 7 rolling holder model
+deal_outcome_model.py        shared outcome helpers for structural model
+arb_capacity.py              Stage 7-8 capacity helpers
+arb_signal.py                Stage 5-10 decisions and historical P&L
+material_builder.py          disposable presentation-output exporter
+
+docs/                        current human-readable deliverables
 ```
 
-The modular `arb_*.py` files remain the readable implementation and test surface.
-`arb_pipeline.py` is the delivery entry point that combines their run order into
-one command. Generated root-level CSVs are reproducible working files and are
-gitignored; curated presentation outputs live in `material/`.
+The stage modules are the implementation and unit-test surface.
+`arb_pipeline.py` contains no duplicated model implementation.
 
 ## Tests
 
-Run the focused regression suite:
-
 ```bash
-python -m unittest -v test_outcome_tuning.py test_strategy_history.py
+python3 -m unittest -v test_outcome_tuning.py test_strategy_history.py
+PYTHONPYCACHEPREFIX=/tmp/jpm_pycache python3 -m py_compile *.py
+python3 arb_pipeline.py check
 ```
 
-Run a syntax check over the Python entry points:
+For an integration test with the standard local inputs:
 
 ```bash
-python -m py_compile *.py
+python3 arb_pipeline.py fast
 ```
 
-For a full integration check with local licensed inputs:
+## Interpreting the Results
 
-```bash
-python arb_pipeline.py check
-python arb_pipeline.py fast
-```
-
-## Output Interpretation
-
-- `6.42%` is aggregate expected P&L divided by aggregate opportunity notional
-  across the 20 selected trades. It is not a time-series return.
+- `6.42%` is expected P&L divided by aggregate opportunity notional across the
+  twenty selected trades. It is not a time-series cumulative return.
 - `96.67%` is the additive sum of capacity-weighted daily returns across
-  sequential opportunities. Capital is reused, so it is not comparable to
-  6.42% without accounting for time.
-- Active-position Sharpe/Sortino use only days with at least one position.
-- Full-calendar Sharpe/Sortino retain inactive business days as zero returns.
-- `completion_only` and `all_tradable` are currently identical because all 18
-  reconstructed outcomes are completed.
-- The three-class outcome model is evaluated with temporal Brier score and
-  prior-adjusted balanced metrics, not accuracy on the completion-only
-  deployment frame.
+  sequential opportunities. Capital is reused.
+- Sixteen trades have directly reconstructable terminal settlement returns.
+- Eighteen trades have enough common price history for daily reconstruction.
+- Cross-sectional terminal Sortino is undefined because none of the sixteen
+  terminal returns is negative.
+- Daily Sortino is defined because profitable terminal trades still have
+  negative mark-to-market days.
+- Active-position ratios use only days with an open position.
+- Full-calendar ratios retain inactive business days as zero returns.
+- Completion-only and all-tradable historical results are currently identical
+  because the executable reconstructed sample contains no broken deals.
+- The three-class outcome model is evaluated with temporal Brier score, log
+  loss, balanced accuracy, and macro-F1, not accuracy on the completed-only
+  application frame.
 
 ## Known Limitations
 
-- **Disclosure ceiling:** only 73 deals disclose usable election demand.
-- **Outcome signal:** temporal Brier improves from 0.317 for prior-only to 0.307
-  for the tuned model; useful, but modest.
-- **Survivorship:** historical daily paths currently contain completed trades
-  only. A complete all-outcome backtest needs actual break paths.
-- **Execution costs:** reported historical returns exclude transaction costs,
-  financing, and borrow fees.
-- **Capacity assumptions:** ADV and observed ownership are data inputs, but some
-  sale, lending, borrow, and holder-behavior rates remain assumptions.
-- **Licensed data:** Bloomberg and CRSP source exports cannot be committed to the
-  public repository.
+- Only 73 deals disclose direct usable election demand.
+- The all-status outcome model adds modest probability skill, not strong
+  terminated/withdrawn classification.
+- Historical strategy paths are completion-only and therefore survivorship
+  biased.
+- Transaction costs, financing, borrow fees, and locate failures are excluded.
+- Some capacity flow and holder-behavior rates remain assumptions.
+- Private/foreign acquirers and incomplete common price histories remain outside
+  the fully hedged historical sample.
 
-## Supporting Documentation
+## Documentation
 
-- [ARB_FRAMEWORK.md](ARB_FRAMEWORK.md): model mechanics and scope
-- [Field_File_Timeline_Guide.md](Field_File_Timeline_Guide.md): field timing and
-  source hierarchy
-- [material/material_manifest.md](material/material_manifest.md): presentation
-  output catalog
-- [material/stage4_to_stage10_speaker_script_5_7min.md](material/stage4_to_stage10_speaker_script_5_7min.md):
-  concise speaker script source
+- [ARB_FRAMEWORK.md](ARB_FRAMEWORK.md): model mechanics and validation scope.
+- [Updated project report](docs/JPM_Project_3ii_Report_Updated.docx): current
+  text-only Stage 0-10 report.
+- [Bilingual Stage 4-10 speaker script](docs/Stage4-Stage10_Bilingual_Speaker_Script.docx).
+- [Speaker-script source](docs/stage4_to_stage10_speaker_script_5_7min.md).

@@ -20,11 +20,15 @@ capture more than the average. How much you capture depends on the demand draw �
 | `arb_capacity.py` | CAPACITY OVERLAY — rolling structural holder mix, finite float/ADV, noisy vs positive-holder flow, and self-impact on election demand | (importable) |
 | `arb_outcome.py` | OUTCOME ADAPTER — temporally tune/consume completed/terminated/withdrawn Naive Bayes probabilities; otherwise mark scenario defaults | `deal_outcome_probabilities.csv` when run |
 | `arb_backtest.py` | VALIDATION — (A) leave-one-out calibration, (B) realized-edge event study | `arb_realized_edge.csv` |
-| `arb_run.py` | DRIVER — runs all, writes figures + summary | `arb_output/` |
+| `arb_run.py` | MC DRIVER — terms, calibration, per-deal MC, and portfolio MC | `arb_output/` |
 | `arb_signal.py` | TRADE LAYER — long election trade, passive-settlement reverse trade, hedge, max/optimal capacity, go/no-go rule | `arb_signals.csv`, `arb_strategy_summary.json` |
 | `fix_acquirer_prices.py` | recover acquirer prices lost to identifier drift (CUSIP→PERMNO) | appends to `wrds_market_daily.csv` |
 
-Run everything: `.venv/bin/python3 arb_run.py && .venv/bin/python3 arb_outcome.py && .venv/bin/python3 arb_signal.py --outcome-probs deal_outcome_probabilities.csv`
+Run the canonical offline rebuild: `.venv/bin/python3 arb_pipeline.py check && .venv/bin/python3 arb_pipeline.py fast`.
+
+`arb_pipeline.py` is the only orchestration entry point. The stage modules remain
+the implementation and test surface; generated `arb_output/` and `material/`
+directories are disposable and are not version-controlled.
 
 Optional outcome probabilities: `arb_signal.py --outcome-probs path/to/outcome_probs.csv`.
 That file must be event-level and include `event_id` plus either

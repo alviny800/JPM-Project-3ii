@@ -37,7 +37,7 @@ LAYER_MAP = [
     {
         "order": 1,
         "layer": "outcome_risk",
-        "source": "arb_outcome.py, deal_outcome_model.py",
+        "source": "arb_outcome.py",
         "role": "Convert BBG Deal Status into event-level completed/terminated/withdrawn probabilities.",
         "key_outputs": "deal_outcome_probabilities.csv and class/probability summaries.",
         "performance": "Temporal OOS Brier score/skill, balanced accuracy, macro-F1, class counts, average break probability.",
