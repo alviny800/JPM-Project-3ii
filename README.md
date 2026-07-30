@@ -97,6 +97,9 @@ Monte Carlo consumes those probabilities.
 
 `python3 arb_pipeline.py check` validates these exact paths and required columns:
 
+See [data.md](data.md) for file-by-file placement, contents, units, join keys,
+and snapshot installation instructions.
+
 | Path | Purpose | How it is produced |
 |---|---|---|
 | `BBG Data Pull 2006+ Final.csv` | all-status outcome-model training data | licensed Bloomberg export |
