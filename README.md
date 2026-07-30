@@ -1,10 +1,16 @@
 # Cash-or-Stock Election Arbitrage
 
-This repository contains the canonical Stage 0-10 research pipeline for
-cash-or-stock merger elections. It starts with the Bloomberg deal universe,
-rebuilds SEC/WRDS inputs when credentials are available, estimates election
-demand and deal-outcome risk, constructs ENTER/REVERSE decisions, sizes the
-trades, and reconstructs historical target/acquirer hedged P&L.
+This repository contains the Stage 0-10 research code for cash-or-stock merger
+elections. The workflow has two explicit execution boundaries:
+
+1. **Credentialed data build (Stage 0-1):** starts from a manually supplied
+   Bloomberg export, then uses separate SEC, WRDS, and LLM scripts plus manual
+   identifier review.
+2. **Offline analytics rebuild (Stage 2-10):** starts after the seven standard
+   local inputs exist and is orchestrated by `arb_pipeline.py`.
+
+A fresh clone does not contain the licensed Bloomberg/WRDS/SEC-derived inputs
+and therefore cannot run Stage 2-10 until those files are restored or rebuilt.
 
 The repository intentionally tracks only:
 
@@ -46,11 +52,13 @@ source .venv/bin/activate
 python3 -m pip install --upgrade pip
 python3 -m pip install -r requirements.txt
 
+# Restore or build the seven files listed under "Offline Analytics Inputs".
 python3 arb_pipeline.py check
 python3 arb_pipeline.py fast
 ```
 
-`arb_pipeline.py` is the only orchestration entry point. `fast` runs each
+`arb_pipeline.py` is the orchestration entry point for the offline Stage 2-10
+chain. It does not download Bloomberg, SEC, WRDS, or LLM data. `fast` runs each
 offline analytics layer once and regenerates the presentation material at the
 end:
 
@@ -85,7 +93,7 @@ The conceptual stage order and execution order differ slightly: Stage 4
 probabilities are generated before the Stage 3 portfolio overlay because the
 Monte Carlo consumes those probabilities.
 
-## Standard Local Inputs
+## Offline Analytics Inputs
 
 `python3 arb_pipeline.py check` validates these exact paths and required columns:
 
@@ -116,7 +124,7 @@ python3 arb_pipeline.py check
 The command fails before model work if a standard file or required column is
 missing.
 
-### 2. Run everything
+### 2. Run all offline analytics
 
 ```bash
 python3 arb_pipeline.py fast
@@ -143,11 +151,12 @@ python3 arb_pipeline.py material
 Layer commands are for debugging. A normal rebuild should use `fast` so paths
 and execution order remain consistent.
 
-## Full Data Build
+## Credentialed Data Build (Stage 0-1)
 
 Run this only when the Bloomberg universe, SEC extraction, CRSP market data, or
 ownership data must be replaced. It requires licensed data, credentials, API
-access, and manual audit.
+access, and manual audit. This section is a sequence of commands, not an
+unattended `arb_pipeline.py` mode.
 
 ### 1. Credentials
 
@@ -303,7 +312,7 @@ Delete any of these files safely and rerun `python3 arb_pipeline.py fast`.
 ## Code Layout
 
 ```text
-arb_pipeline.py              canonical Stage 0-10 CLI and run order
+arb_pipeline.py              canonical offline Stage 2-10 CLI and run order
 
 prepare_input_identifiers.py Stage 0 Bloomberg/CUSIP preparation
 cik_resolution.py            Stage 0 SEC identity audit

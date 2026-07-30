@@ -24,10 +24,13 @@ capture more than the average. How much you capture depends on the demand draw �
 | `arb_signal.py` | TRADE LAYER — long election trade, passive-settlement reverse trade, hedge, max/optimal capacity, go/no-go rule | `arb_signals.csv`, `arb_strategy_summary.json` |
 | `fix_acquirer_prices.py` | recover acquirer prices lost to identifier drift (CUSIP→PERMNO) | appends to `wrds_market_daily.csv` |
 
-Run the canonical offline rebuild: `.venv/bin/python3 arb_pipeline.py check && .venv/bin/python3 arb_pipeline.py fast`.
+After the credentialed Stage 0-1 inputs have been built, run the canonical
+offline Stage 2-10 rebuild:
+`.venv/bin/python3 arb_pipeline.py check && .venv/bin/python3 arb_pipeline.py fast`.
 
-`arb_pipeline.py` is the only orchestration entry point. The stage modules remain
-the implementation and test surface; generated `arb_output/` and `material/`
+`arb_pipeline.py` is the offline analytics orchestration entry point; it does
+not download Bloomberg, SEC, WRDS, or LLM data. The stage modules remain the
+implementation and test surface; generated `arb_output/` and `material/`
 directories are disposable and are not version-controlled.
 
 Optional outcome probabilities: `arb_signal.py --outcome-probs path/to/outcome_probs.csv`.

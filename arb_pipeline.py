@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Canonical Stage 0-10 orchestration for the election-arbitrage project.
+"""Canonical offline Stage 2-10 orchestration for the election-arbitrage project.
 
 The implementation lives in the stage modules. This file owns only run order,
-standard paths, preflight validation, and the consolidated command-line
-interface.
+standard paths, preflight validation, and the consolidated offline
+command-line interface. Credentialed/manual Stage 0-1 data construction is
+documented in README.md and intentionally remains separate.
 
 Commands:
   python arb_pipeline.py check
@@ -66,7 +67,7 @@ STANDARD_INPUTS = {
 def run_preflight_check() -> bool:
     """Validate every local input required by the normal offline rebuild."""
     ok = True
-    print("[check] Stage 0-10 local inputs")
+    print("[check] offline Stage 2-10 inputs produced by Stage 0-1")
     for path_text, spec in STANDARD_INPUTS.items():
         path = Path(path_text)
         if not path.exists():
@@ -208,11 +209,14 @@ def run_fast_pipeline(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run the canonical cash-or-stock election-arbitrage pipeline."
+        description="Run the offline Stage 2-10 election-arbitrage pipeline."
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    sub.add_parser("check", help="Validate all local inputs required by Stage 0-10.")
+    sub.add_parser(
+        "check",
+        help="Validate local inputs required by the offline Stage 2-10 rebuild.",
+    )
 
     outcome = sub.add_parser("outcome", help="Build Stage 4 outcome probabilities.")
     outcome.add_argument("--bbg", default="BBG Data Pull 2006+ Final.csv")
