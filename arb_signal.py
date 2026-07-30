@@ -31,6 +31,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 import json
+import math
 from pathlib import Path
 import zlib
 import numpy as np
@@ -1017,34 +1018,44 @@ def _json_ready(value):
 
 
 def _risk_adjusted_block(trades):
-    """Cross-sectional (per-trade) risk-adjusted performance on REALIZED returns of the traded book.
-    Reports equal-weighted mean/median/std, cross-sectional Sharpe (mean/std) and Sortino
-    (mean/downside-std), split by ENTER vs REVERSE, plus an ex-largest-winner sensitivity.
-    CAVEAT: the universe is completed-only, so there are no losers -> these are UPPER BOUNDS, not
-    tradeable Sharpe ratios (see future work: terminated-deal backtest)."""
+    """Completion-only, cross-sectional diagnostics for realized trade returns.
+
+    Mean/std is retained as a descriptive concentration ratio, not presented as
+    an annualized strategy Sharpe. Sortino uses a 0% minimum acceptable return,
+    so it is intentionally undefined when the sample has no negative returns.
+    """
     def _stats(x):
         x = pd.to_numeric(x, errors="coerce").dropna()
         if len(x) < 1:
             return {"n": 0}
-        std = float(x.std())
-        downside = x[x < x.mean()]
-        dstd = float(downside.std()) if len(downside) > 1 else float("nan")
+        std = float(x.std(ddof=1)) if len(x) > 1 else float("nan")
+        downside = np.minimum(x.to_numpy(dtype=float), 0.0)
+        downside_deviation = float(np.sqrt(np.mean(np.square(downside))))
+        mean = float(x.mean())
         return {
             "n": int(len(x)),
-            "mean_%": round(float(x.mean()), 2),
+            "mean_%": round(mean, 2),
             "median_%": round(float(x.median()), 2),
             "std_%": round(std, 2),
             "min_%": round(float(x.min()), 2),
             "max_%": round(float(x.max()), 2),
-            "cross_sectional_sharpe": round(float(x.mean() / std), 2) if std > 0 else None,
-            "sortino": round(float(x.mean() / dstd), 2) if np.isfinite(dstd) and dstd > 0 else None,
+            "negative_trade_count": int((x < 0).sum()),
+            "hit_rate_%": round(float((x > 0).mean() * 100.0), 2),
+            "cross_sectional_mean_to_std": round(mean / std, 2)
+            if np.isfinite(std) and std > 0 else None,
+            "sortino_0pct_mar": round(mean / downside_deviation, 2)
+            if downside_deviation > 0 else None,
         }
     sig = trades["signal"].astype(str)
     r = _numeric(trades, "realized_return_%").dropna()
     ex = r.drop(r.idxmax()) if len(r) > 1 else r          # drop the single biggest realized winner
     return {
-        "note": ("cross-sectional (per-trade) on realized returns; SURVIVORSHIP-BIASED "
-                 "(completed-only universe, no losers) -> upper bound, not a tradeable Sharpe"),
+        "note": (
+            "Cross-sectional realized-return diagnostics on the completed-election sample. "
+            "Deal breaks are absent from realized election returns, so mean/std and Sortino "
+            "are sensitivity statistics, not investable or annualized strategy ratios."
+        ),
+        "minimum_acceptable_return_%": 0.0,
         "all_trades": _stats(r),
         "enter": _stats(_numeric(trades[sig.eq("ENTER")], "realized_return_%")),
         "reverse": _stats(_numeric(trades[sig.eq("REVERSE")], "realized_return_%")),
@@ -1058,7 +1069,8 @@ def _render_risk_png(rap, out_path="arb_output/risk_performance.png"):
     order = [("all_trades", "All trades"), ("enter", "ENTER"),
              ("reverse", "REVERSE"), ("all_ex_largest_winner", "Ex-top winner")]
     cols = [("n", "n"), ("mean_%", "Mean %"), ("median_%", "Median %"),
-            ("std_%", "Std"), ("cross_sectional_sharpe", "Sharpe"), ("sortino", "Sortino")]
+            ("std_%", "Std"), ("cross_sectional_mean_to_std", "Mean / Std"),
+            ("sortino_0pct_mar", "Sortino (0%)")]
 
     def _fmt(v):
         if v is None or (isinstance(v, float) and not np.isfinite(v)):
@@ -1083,27 +1095,278 @@ def _render_risk_png(rap, out_path="arb_output/risk_performance.png"):
         return
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
     INK = "#003057"
-    fig, ax = plt.subplots(figsize=(7.4, 1.1 + 0.5 * len(rows)))
+    fig, ax = plt.subplots(figsize=(11.3, 2.7))
     ax.axis("off")
     tbl = ax.table(cellText=rows, rowLabels=labels,
-                   colLabels=[c[1] for c in cols], loc="center", cellLoc="center")
+                   colLabels=[c[1] for c in cols], loc="center", cellLoc="center",
+                   colWidths=[0.10, 0.14, 0.14, 0.12, 0.22, 0.24])
     tbl.auto_set_font_size(False)
-    tbl.set_fontsize(11)
-    tbl.scale(1, 1.7)
+    tbl.set_fontsize(10.5)
+    tbl.scale(1, 1.5)
     for j in range(len(cols)):
         tbl[0, j].set_facecolor(INK)
         tbl[0, j].set_text_props(color="white", weight="bold")
-    ax.set_title("Risk-adjusted performance — realized trades (cross-sectional)",
+    ax.set_title("Completion-only realized-return diagnostics (cross-sectional)",
                  fontsize=13, weight="bold", color=INK, pad=16)
-    fig.text(0.5, 0.03, "Survivorship-biased (completed-only universe, no losers) "
-             "→ upper bound, not a tradeable Sharpe",
+    fig.text(0.5, 0.03, "Deal breaks are outside this realized-election sample. "
+             "Mean / Std is descriptive; Sortino uses a 0% MAR and is n/a without losses.",
              ha="center", fontsize=8, style="italic", color="#434545")
     fig.tight_layout()
     fig.savefig(out_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
 
 
-def summarize_strategy(out, output_path="arb_strategy_summary.json"):
+def _annualized_daily_stats(returns):
+    ret = pd.to_numeric(pd.Series(returns), errors="coerce").dropna()
+    if ret.empty:
+        return {"day_count": 0}
+    std = float(ret.std(ddof=1)) if len(ret) > 1 else float("nan")
+    downside = np.minimum(ret.to_numpy(dtype=float), 0.0)
+    downside_deviation = float(np.sqrt(np.mean(np.square(downside))))
+    mean = float(ret.mean())
+    cumulative = ret.cumsum()
+    running_peak = cumulative.cummax()
+    drawdown = cumulative - running_peak
+    return {
+        "day_count": int(len(ret)),
+        "mean_daily_return_%": mean * 100.0,
+        "annualized_volatility_%": std * math.sqrt(252.0) * 100.0
+        if np.isfinite(std) else np.nan,
+        "annualized_sharpe_0rf": mean / std * math.sqrt(252.0)
+        if np.isfinite(std) and std > 0 else np.nan,
+        "annualized_sortino_0pct_mar": mean / downside_deviation * math.sqrt(252.0)
+        if downside_deviation > 0 else np.nan,
+        "cumulative_additive_return_%": float(ret.sum() * 100.0),
+        "max_drawdown_additive_%": float(drawdown.min() * 100.0),
+        "positive_day_rate_%": float((ret > 0).mean() * 100.0),
+    }
+
+
+def _strategy_history_scope(event_days, scope_name):
+    if event_days.empty:
+        return pd.DataFrame(), {
+            "scope": scope_name,
+            "status": "no_historical_paths",
+            "trade_count": 0,
+        }
+    grouped_rows = []
+    for date, day in event_days.groupby("date", sort=True):
+        ret = pd.to_numeric(day["daily_return"], errors="coerce")
+        notionals = pd.to_numeric(day["notional"], errors="coerce")
+        valid = np.isfinite(ret)
+        weighted = valid & np.isfinite(notionals) & (notionals > 0)
+        grouped_rows.append({
+            "date": date,
+            "scope": scope_name,
+            "active_trade_count": int(valid.sum()),
+            "active_capacity_trade_count": int(weighted.sum()),
+            "active_notional": float(notionals[weighted].sum()) if weighted.any() else np.nan,
+            "equal_weight_return": float(ret[valid].mean()) if valid.any() else np.nan,
+            "capacity_weighted_return": (
+                float((ret[weighted] * notionals[weighted]).sum() / notionals[weighted].sum())
+                if weighted.any() and notionals[weighted].sum() > 0 else np.nan
+            ),
+        })
+    active = pd.DataFrame(grouped_rows).sort_values("date")
+    if active.empty:
+        return active, {
+            "scope": scope_name,
+            "status": "no_historical_paths",
+            "trade_count": 0,
+        }
+
+    business_dates = pd.date_range(active["date"].min(), active["date"].max(), freq="B")
+    calendar = active.set_index("date").reindex(business_dates)
+    calendar.index.name = "date"
+    calendar["scope"] = scope_name
+    calendar["active_trade_count"] = calendar["active_trade_count"].fillna(0).astype(int)
+    calendar["active_capacity_trade_count"] = calendar["active_capacity_trade_count"].fillna(0).astype(int)
+    calendar["active_notional"] = calendar["active_notional"].fillna(0.0)
+    calendar["equal_weight_return"] = calendar["equal_weight_return"].fillna(0.0)
+    calendar["capacity_weighted_return"] = calendar["capacity_weighted_return"].fillna(0.0)
+    calendar = calendar.reset_index()
+
+    active_capacity = active["capacity_weighted_return"].dropna()
+    active_equal = active["equal_weight_return"].dropna()
+    return calendar, {
+        "scope": scope_name,
+        "status": "ok",
+        "trade_count": int(event_days["event_id"].nunique()),
+        "actual_outcome_counts": event_days.drop_duplicates("event_id")["actual_outcome"].value_counts().to_dict(),
+        "start_date": str(active["date"].min().date()),
+        "end_date": str(active["date"].max().date()),
+        "active_day_capacity_weighted": _annualized_daily_stats(active_capacity),
+        "active_day_equal_weighted": _annualized_daily_stats(active_equal),
+        "calendar_day_capacity_weighted": _annualized_daily_stats(calendar["capacity_weighted_return"]),
+        "calendar_day_equal_weighted": _annualized_daily_stats(calendar["equal_weight_return"]),
+    }
+
+
+def build_strategy_history(
+    trades,
+    market_daily_path="ma_market_wrds/wrds_market_daily.csv",
+    deadline_path="deadline_spread.csv",
+    output_path="arb_strategy_daily_returns.csv",
+):
+    """Reconstruct daily hedged P&L and report completion-only/all-tradable Sharpe.
+
+    The CRSP target/acquirer path supplies mark-to-market P&L. A final settlement
+    adjustment makes each event path sum to its observed strategy return.
+    """
+    result = {
+        "method": {
+            "return_path": (
+                "Daily target/acquirer price P&L using the selected hedge ratio; "
+                "the final day reconciles to the observed settlement return when available. "
+                "Otherwise the market-to-deadline path is retained as an explicit fallback."
+            ),
+            "portfolio_weighting": "Capacity-weighted across concurrently active trades.",
+            "sharpe": "Mean daily return / daily standard deviation * sqrt(252), zero risk-free rate.",
+            "calendar_day_variant": "Business days with no active trade are included as zero returns.",
+            "costs": "Transaction costs, financing, and borrow fees are not deducted.",
+        }
+    }
+    if trades is None or trades.empty:
+        result["status"] = "no_trades"
+        return result
+    try:
+        daily = pd.read_csv(market_daily_path)
+        deadlines = pd.read_csv(deadline_path)
+    except FileNotFoundError as exc:
+        result["status"] = "missing_input"
+        result["error"] = str(exc)
+        return result
+
+    daily["price_date"] = pd.to_datetime(daily["price_date"], errors="coerce")
+    daily["announce_date"] = pd.to_datetime(daily["announce_date"], errors="coerce")
+    deadlines["deadline_date"] = pd.to_datetime(deadlines["deadline_date"], errors="coerce")
+    deadline_by_event = deadlines.drop_duplicates("event_id").set_index("event_id")["deadline_date"]
+
+    event_rows = []
+    skipped = {}
+    for _, trade in trades.iterrows():
+        event_id = str(trade.get("event_id", ""))
+        market = daily[daily["event_id"].astype(str).eq(event_id)]
+        target = market[market["side"].astype(str).eq("target")][["price_date", "price", "announce_date"]]
+        acquirer = market[market["side"].astype(str).eq("acquirer")][["price_date", "price", "announce_date"]]
+        if target.empty or acquirer.empty:
+            skipped[event_id] = "missing_target_or_acquirer_market_path"
+            continue
+        announce = target["announce_date"].dropna()
+        if announce.empty:
+            skipped[event_id] = "missing_announce_date"
+            continue
+        start_floor = announce.iloc[0] + pd.Timedelta(days=ENTRY_LAG)
+        merged = target.rename(columns={"price": "target_price"}).merge(
+            acquirer.rename(columns={"price": "acquirer_price"}),
+            on="price_date",
+            how="outer",
+            suffixes=("_target", "_acquirer"),
+        )
+        merged = merged.sort_values("price_date")
+        merged[["target_price", "acquirer_price"]] = (
+            merged[["target_price", "acquirer_price"]].ffill()
+        )
+        merged = merged[merged["price_date"] >= start_floor]
+        deadline = deadline_by_event.get(event_id, pd.NaT)
+        if pd.notna(deadline):
+            merged = merged[merged["price_date"] <= deadline]
+        merged = merged.dropna(subset=["target_price", "acquirer_price"])
+        if len(merged) < 2:
+            skipped[event_id] = "insufficient_common_price_history"
+            continue
+
+        entry_value = float(pd.to_numeric(pd.Series([trade.get("M")]), errors="coerce").iloc[0])
+        hedge_ratio = float(pd.to_numeric(pd.Series([trade.get("hedge_ratio")]), errors="coerce").iloc[0])
+        if not np.isfinite(entry_value) or entry_value <= 0 or not np.isfinite(hedge_ratio):
+            skipped[event_id] = "missing_entry_value_or_hedge_ratio"
+            continue
+
+        signal = str(trade.get("signal", ""))
+        if signal == "ENTER":
+            target_sign, acquirer_sign = 1.0, -1.0
+        elif signal == "REVERSE":
+            target_sign, acquirer_sign = -1.0, 1.0
+        else:
+            skipped[event_id] = "not_an_executed_signal"
+            continue
+        path = (
+            target_sign * merged["target_price"].diff().fillna(0.0)
+            + acquirer_sign * hedge_ratio * merged["acquirer_price"].diff().fillna(0.0)
+        ) / entry_value
+
+        capacity_return = pd.to_numeric(
+            pd.Series([trade.get("capacity_optimal_self_impact_realized_return_%")]),
+            errors="coerce",
+        ).iloc[0]
+        raw_return = pd.to_numeric(pd.Series([trade.get("realized_return_%")]), errors="coerce").iloc[0]
+        total_return = capacity_return / 100.0 if np.isfinite(capacity_return) else raw_return / 100.0
+        if np.isfinite(total_return):
+            path.iloc[-1] += total_return - float(path.sum())
+            return_source = "observed_settlement_reconciled"
+        else:
+            return_source = "market_to_deadline_fallback"
+
+        notional = pd.to_numeric(
+            pd.Series([trade.get("capacity_optimal_notional")]),
+            errors="coerce",
+        ).iloc[0]
+        actual_outcome = str(trade.get("actual_outcome", "")).strip().lower() or "unknown"
+        for date, daily_return in zip(merged["price_date"], path):
+            event_rows.append({
+                "event_id": event_id,
+                "date": date,
+                "signal": signal,
+                "actual_outcome": actual_outcome,
+                "return_source": return_source,
+                "notional": notional,
+                "daily_return": float(daily_return),
+            })
+
+    event_days = pd.DataFrame(event_rows)
+    if event_days.empty:
+        result["status"] = "no_reconstructable_paths"
+        result["skipped_events"] = skipped
+        return result
+
+    all_calendar, all_summary = _strategy_history_scope(event_days, "all_tradable")
+    completed_days = event_days[event_days["actual_outcome"].eq("completed")].copy()
+    completed_calendar, completed_summary = _strategy_history_scope(completed_days, "completion_only")
+    calendars = pd.concat([completed_calendar, all_calendar], ignore_index=True)
+    calendars.to_csv(output_path, index=False)
+    event_output_path = Path(output_path).with_name("arb_strategy_event_daily_returns.csv")
+    event_days.sort_values(["event_id", "date"]).to_csv(event_output_path, index=False)
+
+    event_level = event_days.drop_duplicates("event_id")
+    outcome_counts = event_level["actual_outcome"].value_counts().to_dict()
+    return_source_counts = event_level["return_source"].value_counts().to_dict()
+    result.update({
+        "status": "ok",
+        "reconstructed_trade_count": int(event_days["event_id"].nunique()),
+        "skipped_trade_count": int(len(skipped)),
+        "skipped_events": skipped,
+        "actual_outcome_counts": outcome_counts,
+        "return_source_counts": return_source_counts,
+        "portfolio_daily_output": str(output_path),
+        "event_daily_output": str(event_output_path),
+        "completion_only": completed_summary,
+        "all_tradable": all_summary,
+        "scope_comparison_note": (
+            "All-tradable and completion-only are identical in this run because the executable "
+            "historical blotter contains no terminated or withdrawn events."
+            if sum(v for k, v in outcome_counts.items() if k != "completed") == 0
+            else "All-tradable includes every executable historical outcome; completion-only excludes breaks."
+        ),
+    })
+    return result
+
+
+def summarize_strategy(
+    out,
+    output_path="arb_strategy_summary.json",
+    market_daily_path="ma_market_wrds/wrds_market_daily.csv",
+    deadline_path="deadline_spread.csv",
+):
     """Summarize ENTER and REVERSE as one combined arbitrage book."""
     if out is None or out.empty or "signal" not in out.columns:
         summary = {
@@ -1215,6 +1478,11 @@ def summarize_strategy(out, output_path="arb_strategy_summary.json"):
                 summary[f"{side.lower()}_realized_self_impact_optimal"] = _realized_capacity_block(
                     side_rows, "optimal", "self_impact"
                 )
+        summary["historical_performance"] = build_strategy_history(
+            trades,
+            market_daily_path=market_daily_path,
+            deadline_path=deadline_path,
+        )
 
     summary = _json_ready(summary)
     if output_path:
@@ -1313,7 +1581,18 @@ def config_from_args(args):
 if __name__ == "__main__":
     cfg = config_from_args(parse_args())
     out = build_signals(cfg)
-    summary = summarize_strategy(out, cfg.summary_output_path)
+    summary = summarize_strategy(
+        out,
+        cfg.summary_output_path,
+        market_daily_path=cfg.market_daily_path,
+    )
+    try:
+        from material_builder import export_after_signal
+        material_results = export_after_signal()
+        print("[material] wrote post-MC slide material to material/")
+        print(json.dumps(material_results, indent=2))
+    except Exception as exc:
+        print(f"[material] skipped post-MC material export: {exc}")
     has_signal = "signal" in out.columns
     ent = out[out["signal"] == "ENTER"] if has_signal else pd.DataFrame()
     rev = out[out["signal"] == "REVERSE"] if has_signal else pd.DataFrame()

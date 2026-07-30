@@ -1,0 +1,5 @@
+sample,n,mean_%,median_%,std_%,negative_trade_count,hit_rate_%,cross_sectional_mean_to_std,sortino_0pct_mar
+All trades,16,6.41,2.52,7.75,0,100.0,0.83,
+ENTER,6,9.97,9.64,6.54,0,100.0,1.52,
+REVERSE,10,4.28,2.04,7.92,0,100.0,0.54,
+Ex-top winner,15,5.07,2.35,5.8,0,100.0,0.87,

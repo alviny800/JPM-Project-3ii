@@ -10,6 +10,7 @@ the code falls back to explicit scenario defaults and reports that source.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 import math
 from pathlib import Path
 import re
@@ -48,6 +49,9 @@ CATEGORICAL_MODEL_FEATURES = (
     "acquirer_cusip_present",
 )
 
+ALL_MODEL_FEATURES = NUMERIC_MODEL_FEATURES + CATEGORICAL_MODEL_FEATURES
+MODEL_FEATURE_PREFIX = "__outcome_nb_"
+
 
 @dataclass(frozen=True)
 class OutcomeDefaults:
@@ -55,6 +59,48 @@ class OutcomeDefaults:
     terminated: float = 0.07
     withdrawn: float = 0.05
     withdrawn_share_of_break: float = 0.35
+
+
+@dataclass(frozen=True)
+class OutcomeNBParams:
+    categorical_alpha: float = 1.0
+    prior_strength: float = 1.0
+    variance_shrinkage: float = 0.0
+    likelihood_weight: float = 1.0
+    prior_blend: float = 0.0
+
+    def as_dict(self) -> Dict[str, float]:
+        return {
+            "categorical_alpha": float(self.categorical_alpha),
+            "prior_strength": float(self.prior_strength),
+            "variance_shrinkage": float(self.variance_shrinkage),
+            "likelihood_weight": float(self.likelihood_weight),
+            "prior_blend": float(self.prior_blend),
+        }
+
+
+def outcome_nb_candidate_grid() -> List[OutcomeNBParams]:
+    """Small, auditable grid for nested temporal tuning."""
+    candidates = [
+        OutcomeNBParams(
+            categorical_alpha=alpha,
+            prior_strength=25.0,
+            variance_shrinkage=variance_shrinkage,
+            likelihood_weight=likelihood_weight,
+            prior_blend=prior_blend,
+        )
+        for alpha in (0.5, 2.0)
+        for variance_shrinkage in (0.5, 0.9)
+        for likelihood_weight in (0.25, 0.5, 1.0)
+        for prior_blend in (0.5, 0.75, 0.9, 0.95)
+    ]
+    candidates.extend([
+        OutcomeNBParams(0.5, 25.0, 0.9, 0.1, 0.0),
+        OutcomeNBParams(0.5, 25.0, 0.9, 0.25, 0.0),
+        OutcomeNBParams(2.0, 1.0, 0.9, 0.5, 0.75),
+        OutcomeNBParams(2.0, 100.0, 0.9, 0.5, 0.75),
+    ])
+    return candidates
 
 
 def clean_str(value: Any) -> str:
@@ -155,6 +201,12 @@ def present_flag(value: Any) -> str:
 
 
 def bbg_model_features(row: pd.Series) -> Dict[str, Any]:
+    cached = {
+        feature: row.get(f"{MODEL_FEATURE_PREFIX}{feature}")
+        for feature in ALL_MODEL_FEATURES
+    }
+    if all(f"{MODEL_FEATURE_PREFIX}{feature}" in row.index for feature in ALL_MODEL_FEATURES):
+        return cached
     ann = pd.to_datetime(row.get("Announce Date", row.get("announce_date", "")), errors="coerce")
     value = as_float(row.get("Announced Total Value (mil.)"))
     tv_ebitda = as_float(row.get("TV/EBITDA"))
@@ -169,6 +221,18 @@ def bbg_model_features(row: pd.Series) -> Dict[str, Any]:
         "target_cusip_present": present_flag(row.get("Target cusip", row.get("target_cusip", ""))),
         "acquirer_cusip_present": present_flag(row.get("Acquirer cusip", row.get("acquirer_cusip", ""))),
     }
+
+
+def precompute_bbg_model_features(rows: pd.DataFrame) -> pd.DataFrame:
+    """Cache normalized model features once for repeated temporal fits."""
+    out = rows.copy()
+    if all(f"{MODEL_FEATURE_PREFIX}{feature}" in out.columns for feature in ALL_MODEL_FEATURES):
+        return out
+    feature_rows = [bbg_model_features(row) for _, row in out.iterrows()]
+    features = pd.DataFrame(feature_rows, index=out.index)
+    for feature in ALL_MODEL_FEATURES:
+        out[f"{MODEL_FEATURE_PREFIX}{feature}"] = features[feature]
+    return out
 
 
 def _first_probability(row: pd.Series, names: Iterable[str]) -> Optional[float]:
@@ -278,29 +342,47 @@ def outcome_probabilities_for_event(
 
 
 class BbgOutcomeNaiveBayes:
-    def __init__(self, rows: pd.DataFrame, defaults: OutcomeDefaults, alpha: float = 1.0) -> None:
+    def __init__(
+        self,
+        rows: pd.DataFrame,
+        defaults: OutcomeDefaults,
+        alpha: float = 1.0,
+        params: Optional[OutcomeNBParams] = None,
+    ) -> None:
         labeled = rows.copy()
         labeled["_outcome_label"] = labeled["Deal Status"].map(normalize_bbg_deal_status)
         labeled = labeled[labeled["_outcome_label"].isin(OUTCOME_STATES)].copy()
         self.fit_n = int(len(labeled))
-        self.alpha = float(alpha)
+        self.params = params or OutcomeNBParams(categorical_alpha=float(alpha))
+        self.alpha = max(float(self.params.categorical_alpha), 1e-8)
+        self.prior_strength = max(float(self.params.prior_strength), 0.0)
+        self.variance_shrinkage = max(0.0, min(1.0, float(self.params.variance_shrinkage)))
+        self.likelihood_weight = max(0.0, float(self.params.likelihood_weight))
+        self.prior_blend = max(0.0, min(1.0, float(self.params.prior_blend)))
         self.defaults = _normalized_defaults(defaults)
         self.label_counts = {
             state: int((labeled["_outcome_label"] == state).sum())
             for state in OUTCOME_STATES
         }
-        prior_total = self.fit_n + self.alpha * len(OUTCOME_STATES)
+        prior_total = self.fit_n + self.prior_strength
         self.priors = {
-            state: (self.label_counts[state] + self.alpha * self.defaults[state]) / max(prior_total, 1e-12)
+            state: (
+                self.label_counts[state] + self.prior_strength * self.defaults[state]
+            ) / max(prior_total, 1e-12)
             for state in OUTCOME_STATES
         }
         norm = sum(self.priors.values())
         self.priors = {k: v / norm for k, v in self.priors.items()}
 
-        feature_rows = []
-        for idx, row in labeled.iterrows():
-            feature_rows.append({"_row_idx": idx, "_outcome_label": row["_outcome_label"], **bbg_model_features(row)})
-        feats = pd.DataFrame(feature_rows)
+        labeled = precompute_bbg_model_features(labeled)
+        feats = pd.DataFrame({
+            "_row_idx": labeled.index,
+            "_outcome_label": labeled["_outcome_label"],
+            **{
+                feature: labeled[f"{MODEL_FEATURE_PREFIX}{feature}"]
+                for feature in ALL_MODEL_FEATURES
+            },
+        })
         self.numeric_stats: Dict[str, Dict[str, Tuple[float, float]]] = {state: {} for state in OUTCOME_STATES}
         self.global_numeric_stats: Dict[str, Tuple[float, float]] = {}
         for feature in NUMERIC_MODEL_FEATURES:
@@ -314,12 +396,21 @@ class BbgOutcomeNaiveBayes:
                 if len(svals) >= 2:
                     mean = float(svals.mean())
                     var = float(svals.var(ddof=1))
-                    self.numeric_stats[state][feature] = (mean, max(var, 1e-4))
+                    global_var = self.global_numeric_stats.get(feature, (mean, var))[1]
+                    shrunk_var = (
+                        (1.0 - self.variance_shrinkage) * var
+                        + self.variance_shrinkage * global_var
+                    )
+                    self.numeric_stats[state][feature] = (mean, max(shrunk_var, 1e-4))
 
         self.category_values: Dict[str, List[str]] = {}
         self.category_counts: Dict[str, Dict[str, Dict[str, float]]] = {state: {} for state in OUTCOME_STATES}
         for feature in CATEGORICAL_MODEL_FEATURES:
-            values = sorted(set(feats[feature].astype(str)) | {"__missing__"}) if feature in feats else ["__missing__"]
+            values = (
+                sorted(set(feats[feature].astype(str)) | {"__missing__", "__other__"})
+                if feature in feats
+                else ["__missing__", "__other__"]
+            )
             self.category_values[feature] = values
             for state in OUTCOME_STATES:
                 counts: Dict[str, float] = {}
@@ -331,30 +422,246 @@ class BbgOutcomeNaiveBayes:
         feats = bbg_model_features(row)
         scores: Dict[str, float] = {}
         for state in OUTCOME_STATES:
-            score = math.log(max(self.priors.get(state, 0.0), 1e-12))
+            log_likelihood = 0.0
             for feature in NUMERIC_MODEL_FEATURES:
                 value = feats.get(feature)
-                if value is None:
+                if value is None or pd.isna(value):
                     continue
                 mean, var = self.numeric_stats.get(state, {}).get(
                     feature,
                     self.global_numeric_stats.get(feature, (0.0, 1.0)),
                 )
                 var = max(var, 1e-4)
-                score += -0.5 * (math.log(2.0 * math.pi * var) + ((float(value) - mean) ** 2) / var)
+                log_likelihood += -0.5 * (
+                    math.log(2.0 * math.pi * var)
+                    + ((float(value) - mean) ** 2) / var
+                )
             for feature in CATEGORICAL_MODEL_FEATURES:
                 value = str(feats.get(feature) or "__missing__")
                 values = self.category_values.get(feature, ["__missing__"])
+                if value not in values:
+                    value = "__other__"
                 counts = self.category_counts.get(state, {}).get(feature, {})
                 denom = sum(counts.values()) + self.alpha * max(1, len(values))
-                score += math.log((counts.get(value, 0.0) + self.alpha) / max(denom, 1e-12))
-            scores[state] = score
+                log_likelihood += math.log(
+                    (counts.get(value, 0.0) + self.alpha) / max(denom, 1e-12)
+                )
+            scores[state] = (
+                math.log(max(self.priors.get(state, 0.0), 1e-12))
+                + self.likelihood_weight * log_likelihood
+            )
         max_score = max(scores.values())
         exp_scores = {k: math.exp(v - max_score) for k, v in scores.items()}
         total = sum(exp_scores.values())
         if total <= 0:
             return dict(self.priors)
-        return {k: exp_scores[k] / total for k in OUTCOME_STATES}
+        posterior = {k: exp_scores[k] / total for k in OUTCOME_STATES}
+        return {
+            k: (1.0 - self.prior_blend) * posterior[k] + self.prior_blend * self.priors[k]
+            for k in OUTCOME_STATES
+        }
+
+
+def tune_bbg_outcome_naive_bayes(
+    rows: pd.DataFrame,
+    defaults: Optional[OutcomeDefaults] = None,
+    candidates: Optional[List[OutcomeNBParams]] = None,
+    min_train_per_class: int = 10,
+    max_validation_years: int = 5,
+) -> Tuple[OutcomeNBParams, pd.DataFrame]:
+    """Select NB parameters using expanding-window validation inside `rows`."""
+    defaults = defaults or OutcomeDefaults()
+    labels = list(OUTCOME_STATES)
+    labeled = rows.copy()
+    labeled["_outcome_label"] = labeled["Deal Status"].map(normalize_bbg_deal_status)
+    labeled = labeled[labeled["_outcome_label"].isin(labels)].copy()
+    labeled["_tuning_date"] = pd.to_datetime(labeled["Announce Date"], errors="coerce")
+    labeled = labeled.dropna(subset=["_tuning_date"]).sort_values("_tuning_date")
+    labeled = precompute_bbg_model_features(labeled)
+    candidate_list = candidates or outcome_nb_candidate_grid()
+
+    validation_years: List[int] = []
+    if not labeled.empty:
+        first_year = int(labeled["_tuning_date"].dt.year.min())
+        last_year = int(labeled["_tuning_date"].dt.year.max())
+        for year in range(first_year + 1, last_year + 1):
+            cutoff = pd.Timestamp(year=year, month=1, day=1)
+            next_cutoff = pd.Timestamp(year=year + 1, month=1, day=1)
+            train = labeled[labeled["_tuning_date"] < cutoff]
+            validation = labeled[
+                (labeled["_tuning_date"] >= cutoff)
+                & (labeled["_tuning_date"] < next_cutoff)
+            ]
+            train_counts = train["_outcome_label"].value_counts()
+            if not validation.empty and all(
+                int(train_counts.get(label, 0)) >= min_train_per_class
+                for label in labels
+            ):
+                validation_years.append(year)
+    if max_validation_years > 0:
+        validation_years = validation_years[-max_validation_years:]
+
+    if not validation_years:
+        fallback = OutcomeNBParams()
+        return fallback, pd.DataFrame([{
+            **fallback.as_dict(),
+            "validation_rows": 0,
+            "validation_years": "",
+            "multiclass_brier_score": None,
+        }])
+
+    results: List[Dict[str, Any]] = []
+    for params in candidate_list:
+        squared_error = 0.0
+        validation_n = 0
+        for year in validation_years:
+            cutoff = pd.Timestamp(year=year, month=1, day=1)
+            next_cutoff = pd.Timestamp(year=year + 1, month=1, day=1)
+            train = labeled[labeled["_tuning_date"] < cutoff]
+            validation = labeled[
+                (labeled["_tuning_date"] >= cutoff)
+                & (labeled["_tuning_date"] < next_cutoff)
+            ]
+            model = BbgOutcomeNaiveBayes(train, defaults, params=params)
+            for _, row in validation.iterrows():
+                probs = model.predict_proba(row)
+                actual = str(row["_outcome_label"])
+                squared_error += sum(
+                    (probs[label] - float(actual == label)) ** 2
+                    for label in labels
+                )
+                validation_n += 1
+        results.append({
+            **params.as_dict(),
+            "validation_rows": int(validation_n),
+            "validation_years": ",".join(str(year) for year in validation_years),
+            "multiclass_brier_score": (
+                float(squared_error / validation_n) if validation_n else None
+            ),
+        })
+
+    tuning = pd.DataFrame(results).sort_values(
+        ["multiclass_brier_score", "likelihood_weight", "categorical_alpha"],
+        ascending=[True, False, True],
+    ).reset_index(drop=True)
+    best_row = tuning.iloc[0]
+    best = OutcomeNBParams(
+        categorical_alpha=float(best_row["categorical_alpha"]),
+        prior_strength=float(best_row["prior_strength"]),
+        variance_shrinkage=float(best_row["variance_shrinkage"]),
+        likelihood_weight=float(best_row["likelihood_weight"]),
+        prior_blend=float(best_row["prior_blend"]),
+    )
+    return best, tuning
+
+
+def tune_outcome_decision_prior_power(
+    rows: pd.DataFrame,
+    params: OutcomeNBParams,
+    defaults: Optional[OutcomeDefaults] = None,
+    candidates: Optional[List[float]] = None,
+    min_train_per_class: int = 5,
+    max_validation_years: int = 5,
+) -> Tuple[float, pd.DataFrame]:
+    """Tune the cost-balanced hard-decision rule on earlier years only."""
+    defaults = defaults or OutcomeDefaults()
+    powers = candidates or [0.0, 0.25, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+    labels = list(OUTCOME_STATES)
+    labeled = rows.copy()
+    labeled["_outcome_label"] = labeled["Deal Status"].map(normalize_bbg_deal_status)
+    labeled = labeled[labeled["_outcome_label"].isin(labels)].copy()
+    labeled["_decision_date"] = pd.to_datetime(labeled["Announce Date"], errors="coerce")
+    labeled = labeled.dropna(subset=["_decision_date"]).sort_values("_decision_date")
+    labeled = precompute_bbg_model_features(labeled)
+
+    years: List[int] = []
+    if not labeled.empty:
+        first_year = int(labeled["_decision_date"].dt.year.min())
+        last_year = int(labeled["_decision_date"].dt.year.max())
+        for year in range(first_year + 1, last_year + 1):
+            cutoff = pd.Timestamp(year=year, month=1, day=1)
+            next_cutoff = pd.Timestamp(year=year + 1, month=1, day=1)
+            train = labeled[labeled["_decision_date"] < cutoff]
+            validation = labeled[
+                (labeled["_decision_date"] >= cutoff)
+                & (labeled["_decision_date"] < next_cutoff)
+            ]
+            train_counts = train["_outcome_label"].value_counts()
+            if not validation.empty and all(
+                int(train_counts.get(label, 0)) >= min_train_per_class
+                for label in labels
+            ):
+                years.append(year)
+    if max_validation_years > 0:
+        years = years[-max_validation_years:]
+    if not years:
+        return 0.5, pd.DataFrame([{
+            "decision_prior_power": 0.5,
+            "validation_rows": 0,
+            "validation_years": "",
+            "balanced_accuracy": None,
+            "macro_f1": None,
+        }])
+
+    validation_records: List[Dict[str, Any]] = []
+    for year in years:
+        cutoff = pd.Timestamp(year=year, month=1, day=1)
+        next_cutoff = pd.Timestamp(year=year + 1, month=1, day=1)
+        train = labeled[labeled["_decision_date"] < cutoff]
+        validation = labeled[
+            (labeled["_decision_date"] >= cutoff)
+            & (labeled["_decision_date"] < next_cutoff)
+        ]
+        model = BbgOutcomeNaiveBayes(train, defaults, params=params)
+        for _, row in validation.iterrows():
+            probs = model.predict_proba(row)
+            validation_records.append({
+                "actual": str(row["_outcome_label"]),
+                **{f"p_{label}": probs[label] for label in labels},
+                **{f"prior_{label}": model.priors[label] for label in labels},
+            })
+
+    validation_df = pd.DataFrame(validation_records)
+    results: List[Dict[str, Any]] = []
+    for power in powers:
+        predicted: List[str] = []
+        for _, row in validation_df.iterrows():
+            scores = {
+                label: float(row[f"p_{label}"]) / max(
+                    float(row[f"prior_{label}"]) ** float(power),
+                    1e-12,
+                )
+                for label in labels
+            }
+            predicted.append(max(labels, key=lambda label: scores[label]))
+        pred = pd.Series(predicted, index=validation_df.index)
+        actual = validation_df["actual"].astype(str)
+        recalls: List[float] = []
+        f1s: List[float] = []
+        for label in labels:
+            actual_label = actual == label
+            predicted_label = pred == label
+            tp = int((actual_label & predicted_label).sum())
+            fp = int((~actual_label & predicted_label).sum())
+            fn = int((actual_label & ~predicted_label).sum())
+            precision = float(tp / (tp + fp)) if tp + fp else 0.0
+            recall = float(tp / (tp + fn)) if tp + fn else 0.0
+            f1 = float(2.0 * precision * recall / (precision + recall)) if precision + recall else 0.0
+            recalls.append(recall)
+            f1s.append(f1)
+        results.append({
+            "decision_prior_power": float(power),
+            "validation_rows": int(len(validation_df)),
+            "validation_years": ",".join(str(year) for year in years),
+            "balanced_accuracy": float(sum(recalls) / len(recalls)),
+            "macro_f1": float(sum(f1s) / len(f1s)),
+        })
+
+    tuning = pd.DataFrame(results).sort_values(
+        ["macro_f1", "balanced_accuracy", "decision_prior_power"],
+        ascending=[False, False, True],
+    ).reset_index(drop=True)
+    return float(tuning.iloc[0]["decision_prior_power"]), tuning
 
 
 def load_bbg_with_keys(path: str = "BBG Data Pull 2006+ Final.csv") -> pd.DataFrame:
@@ -434,17 +741,21 @@ def build_bbg_outcome_probability_table(
     events = load_event_frame_for_outcomes(events_path)
     labeled = bbg[bbg["_outcome_label"].isin(OUTCOME_STATES)].copy()
     if len(labeled) >= min_train_rows:
-        model = BbgOutcomeNaiveBayes(labeled, defaults)
+        tuned_params, tuning = tune_bbg_outcome_naive_bayes(labeled, defaults)
+        model = BbgOutcomeNaiveBayes(labeled, defaults, params=tuned_params)
         default_probs = model.priors
-        model_source = "bbg_naive_bayes_full_training"
+        model_source = "bbg_naive_bayes_temporal_tuned_full_training"
         train_counts = model.label_counts
         train_n = model.fit_n
+        tuning_brier = tuning.iloc[0]["multiclass_brier_score"]
     else:
         model = None
+        tuned_params = OutcomeNBParams()
         default_probs = _normalized_defaults(defaults)
         model_source = "default_probabilities_insufficient_bbg_training_rows"
         train_counts = {state: 0 for state in OUTCOME_STATES}
         train_n = int(len(labeled))
+        tuning_brier = None
     bbg_by_key = {
         str(row["_match_key"]): row
         for _, row in bbg.drop_duplicates("_match_key", keep="first").iterrows()
@@ -489,6 +800,12 @@ def build_bbg_outcome_probability_table(
             "outcome_train_completed": int(train_counts.get("completed", 0)),
             "outcome_train_terminated": int(train_counts.get("terminated", 0)),
             "outcome_train_withdrawn": int(train_counts.get("withdrawn", 0)),
+            "outcome_nb_categorical_alpha": tuned_params.categorical_alpha,
+            "outcome_nb_prior_strength": tuned_params.prior_strength,
+            "outcome_nb_variance_shrinkage": tuned_params.variance_shrinkage,
+            "outcome_nb_likelihood_weight": tuned_params.likelihood_weight,
+            "outcome_nb_prior_blend": tuned_params.prior_blend,
+            "outcome_nb_inner_validation_brier": tuning_brier,
         })
     out = pd.DataFrame(rows)
     out.to_csv(output_path, index=False)
@@ -522,3 +839,10 @@ if __name__ == "__main__":
     )
     print(f"[outcome] wrote {args.out}: {len(table)} rows")
     print(table["outcome_probability_source"].value_counts().to_string())
+    try:
+        from material_builder import export_after_outcome
+        material_results = export_after_outcome()
+        print("[material] wrote outcome slide material to material/")
+        print(json.dumps(material_results, indent=2))
+    except Exception as exc:
+        print(f"[material] skipped outcome material export: {exc}")

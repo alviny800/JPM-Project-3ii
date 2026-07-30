@@ -1,4 +1,7 @@
+matplotlib
+numpy
 pandas
 requests
 rapidfuzz
+scipy
 wrds

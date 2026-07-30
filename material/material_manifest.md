@@ -1,0 +1,90 @@
+# Slide Material Manifest
+
+This folder centralizes outputs for the layers after the Monte Carlo payoff engine.
+
+## Layers
+- 0. monte_carlo_baseline: Demand model, calibration, realized proration edge, and portfolio MC baseline. Performance: KS PIT calibration, realized-edge mean/median, portfolio mean/p05.
+- 1. outcome_risk: Convert BBG Deal Status into event-level completed/terminated/withdrawn probabilities. Performance: Temporal OOS Brier score/skill, balanced accuracy, macro-F1, class counts, average break probability.
+- 2. holder_structure: Rolling p/q holder model for noisy versus EV-sensitive election behavior. Performance: Coverage, fit history size, prediction MAE/correlation where actual demand exists.
+- 3. capacity_self_impact: Size trades under source supply, ADV, position limits, and election self-impact. Performance: Capacity coverage, total notional, expected PnL, binding constraints, break-even impact.
+- 4. risk_gated_signal: Choose ENTER, REVERSE, REVIEW, or PASS with hedges and risk gates. Performance: Hit rate, expected-vs-realized correlation, downside/loss-probability diagnostics.
+- 5. combined_strategy: Roll capacity-sized ENTER and REVERSE trades into a portfolio-level strategy view. Performance: Weighted expected return, realized return on deployed capital, wrong trades, missed passes.
+- 6. strategy_results: Separate forward-looking strategy economics from completion-only realized-return diagnostics. Performance: Expected PnL, covered realized PnL, expected-vs-realized correlation, mean/std sensitivity.
+
+## Files
+- `00_layer_map.csv`
+- `00_mc_beta_qq.png`
+- `00_mc_calibration_pit.png`
+- `00_mc_demand_distribution.png`
+- `00_mc_key_metrics.csv`
+- `00_mc_performance_summary.json`
+- `00_mc_portfolio_pnl.png`
+- `00_mc_ready_deal_terms.csv`
+- `00_mc_realized_edge.png`
+- `00_mc_spread_distribution.png`
+- `00_mc_summary.md`
+- `00_mc_terms_coverage.csv`
+- `00_mc_terms_coverage.png`
+- `01_outcome_average_probabilities.csv`
+- `01_outcome_average_probabilities.png`
+- `01_outcome_break_probability_distribution.png`
+- `01_outcome_brier_comparison.png`
+- `01_outcome_confusion_matrix.csv`
+- `01_outcome_confusion_matrix.png`
+- `01_outcome_full_training_decision_tuning.csv`
+- `01_outcome_full_training_tuning_grid.csv`
+- `01_outcome_performance_summary.json`
+- `01_outcome_probabilities.csv`
+- `01_outcome_probability_by_actual.csv`
+- `01_outcome_temporal_oos_by_year.csv`
+- `01_outcome_temporal_oos_metrics.csv`
+- `01_outcome_temporal_oos_predictions.csv`
+- `01_outcome_temporal_tuning_choices.csv`
+- `02_holder_fit_history_distribution.png`
+- `02_holder_model_estimates.csv`
+- `02_holder_p_q_scatter.png`
+- `02_holder_performance_summary.json`
+- `02_holder_predicted_vs_actual.csv`
+- `02_holder_predicted_vs_actual_cash_demand.png`
+- `02_holder_source_counts.csv`
+- `02_holder_source_counts.png`
+- `03_capacity_binding_constraints.csv`
+- `03_capacity_binding_constraints.png`
+- `03_capacity_expected_pnl_by_trade.png`
+- `03_capacity_notional_by_trade.png`
+- `03_capacity_notional_vs_expected_return.png`
+- `03_capacity_performance_summary.json`
+- `03_capacity_self_impact_break_even.png`
+- `03_capacity_trade_sizing.csv`
+- `04_signal_counts.csv`
+- `04_signal_counts.png`
+- `04_signal_expected_vs_realized.png`
+- `04_signal_full_blotter.csv`
+- `04_signal_performance_by_trade_type.csv`
+- `04_signal_performance_summary.json`
+- `04_signal_slide_blotter.csv`
+- `04_signal_trade_return_distribution.png`
+- `04_signal_trade_type_realized_return.png`
+- `05_strategy_key_metrics.csv`
+- `05_strategy_pnl_bridge.png`
+- `05_strategy_summary.json`
+- `05_strategy_summary_flat.csv`
+- `05_strategy_trade_counts.csv`
+- `05_strategy_trade_counts.png`
+- `06_strategy_result_completion_only_diagnostics.csv`
+- `06_strategy_result_completion_only_diagnostics.png`
+- `06_strategy_result_daily_performance.csv`
+- `06_strategy_result_daily_performance.png`
+- `06_strategy_result_event_cumulative_return.csv`
+- `06_strategy_result_event_cumulative_return.png`
+- `06_strategy_result_historical_sharpe.csv`
+- `06_strategy_result_historical_sharpe.png`
+- `06_strategy_result_key_metrics.csv`
+- `06_strategy_result_time_cumulative_return.csv`
+- `06_strategy_result_time_cumulative_return.png`
+- `06_strategy_result_validation_boundary.json`
+- `Stage4-Stage10_Bilingual_Speaker_Script.docx`
+- `Stage4-Stage10_Bilingual_Speaker_Script.pdf`
+- `material_index.csv`
+- `material_manifest.md`
+- `stage4_to_stage10_speaker_script_5_7min.md`

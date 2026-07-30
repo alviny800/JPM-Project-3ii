@@ -1,0 +1,22 @@
+{
+  "completion_only_use": "Use realized-return statistics only as cross-sectional sensitivity on completed election outcomes.",
+  "headline_use": "Use expected PnL, capacity, and nested-OOS probability metrics for the forward-looking strategy.",
+  "historical_outcome_counts": {
+    "completed": 18
+  },
+  "historical_return_source_counts": {
+    "market_to_deadline_fallback": 4,
+    "observed_settlement_reconciled": 14
+  },
+  "historical_scope_comparison": "All-tradable and completion-only are identical in this run because the executable historical blotter contains no terminated or withdrawn events.",
+  "historical_sharpe_method": {
+    "calendar_day_variant": "Business days with no active trade are included as zero returns.",
+    "costs": "Transaction costs, financing, and borrow fees are not deducted.",
+    "portfolio_weighting": "Capacity-weighted across concurrently active trades.",
+    "return_path": "Daily target/acquirer price P&L using the selected hedge ratio; the final day reconciles to the observed settlement return when available. Otherwise the market-to-deadline path is retained as an explicit fallback.",
+    "sharpe": "Mean daily return / daily standard deviation * sqrt(252), zero risk-free rate."
+  },
+  "not_claimed": "No annualized strategy Sharpe or investable Sortino is claimed because broken deals lack realized election demand.",
+  "sortino_definition": "Mean realized return divided by downside deviation relative to a 0% minimum acceptable return.",
+  "source_note": "Cross-sectional realized-return diagnostics on the completed-election sample. Deal breaks are absent from realized election returns, so mean/std and Sortino are sensitivity statistics, not investable or annualized strategy ratios."
+}

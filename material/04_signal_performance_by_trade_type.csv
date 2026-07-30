@@ -1,0 +1,3 @@
+signal,trades,avg_E_return_pct,avg_realized_return_pct,hit_rate_pct
+ENTER,10,4.483,9.968333333333334,100.0
+REVERSE,10,8.405,4.275,100.0

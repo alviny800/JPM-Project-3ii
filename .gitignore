@@ -50,7 +50,6 @@ ma_edgar_audit_cache/
 # NOTE: cik_manual_overrides.csv is hand-verified config (public CIKs) — intentionally NOT ignored; commit it.
 partials_4.csv
 ma_edgar_partials/
-partials_4.csv
 ma_edgar_full/
 
 # Run logs (regenerable)
@@ -69,7 +68,13 @@ archive/
 arb_deals.csv
 deadline_spread.csv
 arb_signals.csv
+arb_signals_clean.csv
 arb_realized_edge.csv
+deal_outcome_probabilities.csv
+arb_strategy_daily_returns.csv
+arb_strategy_event_daily_returns.csv
+arb_strategy_summary.csv
+arb_strategy_summary.json
 eda_output/
 
 # PowerPoint/Office lock files

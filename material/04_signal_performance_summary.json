@@ -1,0 +1,22 @@
+{
+  "avg_downside_5pct_%": -10.3625,
+  "avg_loss_probability_%": 7.2525,
+  "capacity_adjusted_expected_vs_realized_corr": 0.7777075801513627,
+  "capacity_adjusted_hit_rate_%": 100.0,
+  "expected_vs_realized_corr": 0.7802492119867623,
+  "mean_capacity_adjusted_expected_return_%": 6.42392,
+  "mean_capacity_adjusted_realized_return_%": 6.40510625,
+  "mean_trade_expected_return_%": 6.444,
+  "mean_trade_realized_return_%": 6.41,
+  "priced_signal_count": 88,
+  "signal_counts": {
+    "ENTER": 10,
+    "PASS": 1,
+    "PASS_LOSS_PROB": 28,
+    "PASS_P05": 19,
+    "REVERSE": 10,
+    "REVIEW": 20
+  },
+  "trade_count": 20,
+  "trade_hit_rate_%": 100.0
+}

@@ -1,0 +1,15 @@
+{
+  "median_fit_n": 28.0,
+  "median_noisy_share": 0.9,
+  "median_p_hat": 0.3,
+  "median_positive_share": 0.1,
+  "median_q_hat": 0.1,
+  "prediction_corr": -0.012988986785107938,
+  "prediction_coverage": 46,
+  "prediction_mae_pctpts": 32.09194525953211,
+  "row_count": 293,
+  "source_counts": {
+    "rolling_structural_default": 32,
+    "rolling_structural_fit": 261
+  }
+}
